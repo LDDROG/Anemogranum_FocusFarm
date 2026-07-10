@@ -1,3 +1,0 @@
-D:\CMake\bin\cmake.exe -E rm -f CMakeFiles\FocusFarm.dir/objects.a
-D:\MinGW\mingw64\bin\ar.exe qc CMakeFiles\FocusFarm.dir/objects.a @CMakeFiles\FocusFarm.dir\objects1.rsp
-D:\MinGW\mingw64\bin\c++.exe -Wl,--whole-archive CMakeFiles\FocusFarm.dir/objects.a -Wl,--no-whole-archive -o FocusFarm.exe -Wl,--out-implib,libFocusFarm.dll.a -Wl,--major-image-version,0,--minor-image-version,0 @CMakeFiles\FocusFarm.dir\linkLibs.rsp

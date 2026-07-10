@@ -21,19 +21,9 @@
 // ======================== 终端工具函数 ========================
 
 void clearScreen() {
-#ifdef _WIN32
-    HANDLE hConsole = GetStdHandle(STD_OUTPUT_HANDLE);
-    CONSOLE_SCREEN_BUFFER_INFO csbi;
-    COORD topLeft = { 0, 0 };
-    DWORD written;
-    GetConsoleScreenBufferInfo(hConsole, &csbi);
-    DWORD size = csbi.dwSize.X * csbi.dwSize.Y;
-    FillConsoleOutputCharacterA(hConsole, ' ', size, topLeft, &written);
-    FillConsoleOutputAttribute(hConsole, csbi.wAttributes, size, topLeft, &written);
-    SetConsoleCursorPosition(hConsole, topLeft);
-#else
-    std::cout << "\033[2J\033[H";
-#endif
+    // ANSI escape: move cursor to home (0,0) and clear to end of screen
+    // Much faster than FillConsoleOutputCharacterA, eliminates flickering
+    std::cout << "\033[H\033[J";
 }
 
 void hideCursor() {
@@ -1243,15 +1233,6 @@ void Game::updateGame() {
                 m_inputMode = 1;
             }
         }
-    }
-
-    // 每5秒刷新天气
-    auto weatherElapsed = std::chrono::duration_cast<std::chrono::seconds>(now - m_lastWeatherRefresh);
-    if (weatherElapsed.count() >= WEATHER_REFRESH_SEC) {
-        m_lastWeatherRefresh = now;
-        addMessage("\xf0\x9f\x94\x84 \xe6\xad\xa3\xe5\x9c\xa8\xe5\x88\xb7\xe6\x96\xb0\xe5\xa4\xa9\xe6\xb0\x94\xe4\xbf\xa1\xe6\x81\xaf...");
-        refreshWeather();
-        addMessage("\xe2\x9c\x85 \xe5\xa4\xa9\xe6\xb0\x94\xe4\xbf\xa1\xe6\x81\xaf\xe5\xb7\xb2\xe5\x88\xb7\xe6\x96\xb0");
     }
 
     // 每60秒检查有害物品

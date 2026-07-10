@@ -1,0 +1,6 @@
+build/
+*.exe
+*.obj
+*.o
+*.a
+focusfarm_save.dat

@@ -1,3 +1,0 @@
-F:/Code/Anemogranum_FocusFarm/build/CMakeFiles/FocusFarm.dir
-F:/Code/Anemogranum_FocusFarm/build/CMakeFiles/edit_cache.dir
-F:/Code/Anemogranum_FocusFarm/build/CMakeFiles/rebuild_cache.dir
