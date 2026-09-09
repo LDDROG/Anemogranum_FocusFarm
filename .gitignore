@@ -3,4 +3,6 @@ build/
 *.obj
 *.o
 *.a
+*.zip
+.vscode
 focusfarm_save.dat
