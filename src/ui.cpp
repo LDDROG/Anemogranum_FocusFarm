@@ -87,6 +87,14 @@ void renderMainMenu(Game& game, std::ostringstream& ui)
     renderCard(SceneType::PASTURE, "··", "牧场", "3", curType == SceneType::PASTURE);
     ui << "\n";
     renderCard(SceneType::FIELD, "··", "稻田", "4", curType == SceneType::FIELD);
+
+    // 添加子场景时，实时回显正在输入的名称
+    if (game.inputMode() == 11) {
+        std::time_t nc = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+        std::tm* ti = std::localtime(&nc);
+        bool cursorOn = (ti && (ti->tm_sec % 2 == 0));
+        ui << "\n➕ 新子场景名称: " << game.renameBuffer() << (cursorOn ? "▌" : " ") << "\n";
+    }
 }
 
 void renderSceneGrid(Game& game, Scene& scene, std::ostringstream& ui) 
@@ -336,6 +344,10 @@ void renderFooter(Game& game, std::ostringstream& ui) {
         ui << "  [Y]确认铲除  [其他键]取消\n";
     } else if (im == 9) {
         ui << "  [Y]确认重置  [其他键]取消\n";
+    } else if (im == 11) {
+        ui << "  [Enter]确认添加  [Backspace]删除一个字\n";
+    } else if (im == 12) {
+        ui << "  [Y]确认删除  [其他键]取消\n";
     } else if (im >= 2 && im <= 5) {
         ui << "  按 A-G 选择类型\n";
     } else if (game.showMoonGod()) {
@@ -350,7 +362,7 @@ void renderFooter(Game& game, std::ostringstream& ui) {
         ui << "  [B]返回主菜单  [Q]退出\n";
     } else if (game.inMainMenu()) {
         ui << "  [1-4]选择场景 [Enter]进入 [M]集市 [W]仓库 [H]记录 [S]速度 [X]重置\n";
-        ui << "  [Q]保存并退出\n";
+        ui << "  [A]添加子场景 [D]删除子场景 [↑↓]切换子场景 [Q]保存并退出\n";
     } else {
         Scene* sc = game.currentScene();
         ui << "  [1]专注 [2]停止 [3]种植 [4]除害 [D]铲除作物 [0]休息 [L]"

@@ -288,6 +288,8 @@ private:
 
     void addFocusRecord(double hours, const std::string& sceneName);
 
+    std::vector<Scene>* scenesOf(SceneType type);
+
     std::vector<Scene> m_forests;
     std::vector<Scene> m_ponds;
     std::vector<Scene> m_pastures;

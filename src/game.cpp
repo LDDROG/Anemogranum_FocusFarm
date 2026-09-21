@@ -638,6 +638,16 @@ Scene* Game::getScene(SceneType type, int index) {
     return nullptr;
 }
 
+std::vector<Scene>* Game::scenesOf(SceneType type) {
+    switch (type) {
+        case SceneType::FOREST: return &m_forests;
+        case SceneType::POND: return &m_ponds;
+        case SceneType::PASTURE: return &m_pastures;
+        case SceneType::FIELD: return &m_fields;
+        default: return nullptr;
+    }
+}
+
 std::string Game::pageLabel() {
     if (m_showMoonGod) return "月神降临";
     if (m_inMarket) return "集市";
@@ -915,6 +925,25 @@ void Game::processInput() {
                     cyclePestInterval();
                     addMessage("\xe2\x9a\x99 \xe6\x9d\x82\xe8\x8d\x89\xe7\x94\x9f\xe6\x88\x90\xe9\x80\x9f\xe5\xba\xa6\xe5\xb7\xb2\xe8\xae\xbe\xe4\xb8\xba: " + pestIntervalLabel());
                     break;
+                case 'a': case 'A':
+                    addMessage("✏ 请输入新子场景名称，按 Enter 确认:");
+                    m_renameBuffer.clear();
+                    m_inputMode = 11;
+                    continue;
+                case 'd': case 'D': {
+                    std::vector<Scene>* scenes = scenesOf(m_currentSceneType);
+                    if (!scenes || scenes->empty()) {
+                        addMessage("❌ 没有可删除的子场景");
+                        break;
+                    }
+                    if ((int)scenes->size() <= 1) {
+                        addMessage("❌ 每个场景至少保留一个子场景");
+                        break;
+                    }
+                    addMessage("⚠ 确认删除「" + (*scenes)[m_currentSceneIndex].name() + "」？[Y]确认 [其他键]取消");
+                    m_inputMode = 12;
+                    continue;
+                }
                 case 'x': case 'X':
                     addMessage("⚠ 确认重置整个系统？所有数据将丢失！[Y]确认 [其他键]取消");
                     m_inputMode = 9;
@@ -1395,6 +1424,61 @@ void Game::processInput() {
                         addMessage("⏹ 已停止计时");
                     }
                     // 其他键：保持暂停，继续等待确认
+                    break;
+                }
+                case 11: { // 添加子场景：输入名称
+                    if (ch == '\r' || ch == '\n') {
+                        if (!m_renameBuffer.empty()) {
+                            std::vector<Scene>* scenes = scenesOf(m_currentSceneType);
+                            if (scenes) {
+                                scenes->push_back(Scene(m_currentSceneType, m_renameBuffer));
+                                m_currentSceneIndex = (int)scenes->size() - 1;
+                                addMessage("✅ 已添加子场景「" + m_renameBuffer + "」");
+                            }
+                        }
+                        m_inputMode = 0;
+                        m_renameBuffer.clear();
+                    } else if (ch == '\b' || ch == 127) {
+                        if (!m_renameBuffer.empty()) {
+                            do {
+                                m_renameBuffer.pop_back();
+                            } while (!m_renameBuffer.empty() &&
+                                     ((unsigned char)m_renameBuffer.back() & 0xC0) == 0x80);
+                        }
+                    } else if (ch >= 32) {
+                        m_renameBuffer += ch;
+                    }
+                    break;
+                }
+                case 12: { // 删除子场景确认
+                    if (ch == 'y' || ch == 'Y') {
+                        std::vector<Scene>* scenes = scenesOf(m_currentSceneType);
+                        if (scenes && !scenes->empty() &&
+                            m_currentSceneIndex >= 0 && m_currentSceneIndex < (int)scenes->size()) {
+                            std::string nm = (*scenes)[m_currentSceneIndex].name();
+                            scenes->erase(scenes->begin() + m_currentSceneIndex);
+
+                            // 若正在专注的目标在被删类型上，同步修正其索引
+                            if (m_focusSceneType == m_currentSceneType) {
+                                if (m_focusSceneIndex > m_currentSceneIndex) {
+                                    m_focusSceneIndex--;
+                                } else if (m_focusSceneIndex == m_currentSceneIndex) {
+                                    if (m_focusSceneIndex >= (int)scenes->size())
+                                        m_focusSceneIndex = (int)scenes->size() - 1;
+                                    if (m_focusSceneIndex < 0) m_focusSceneIndex = 0;
+                                }
+                            }
+
+                            if (m_currentSceneIndex >= (int)scenes->size())
+                                m_currentSceneIndex = (int)scenes->size() - 1;
+                            if (m_currentSceneIndex < 0) m_currentSceneIndex = 0;
+
+                            addMessage("🗑 已删除子场景「" + nm + "」");
+                        }
+                    } else {
+                        addMessage("❌ 已取消删除");
+                    }
+                    m_inputMode = 0;
                     break;
                 }
             }
@@ -1983,23 +2067,29 @@ void Game::loadFromFile() {
         }
     }
 
-    // 解析场景数据
-    auto parseScenes = [&](const std::string& prefix, std::vector<Scene>& scenes) {
-        // 首先计数场景数量
+    // 解析场景数据（以存档数量为准动态调整，支持增删子场景）
+    auto parseScenes = [&](const std::string& prefix, std::vector<Scene>& scenes, SceneType type) {
+        size_t count = 0;
         for (size_t i = 0; ; i++) {
+            if (sections.find(prefix + ":" + std::to_string(i)) == sections.end()) break;
+            count = i + 1;
+        }
+        if (count == 0) return;
+
+        while (scenes.size() < count) scenes.push_back(Scene(type, "新场景"));
+        while (scenes.size() > count) scenes.pop_back();
+
+        for (size_t i = 0; i < count; i++) {
             std::string key = prefix + ":" + std::to_string(i);
             auto it = sections.find(key);
-            if (it == sections.end()) break;
-            if (i < scenes.size()) {
-                scenes[i].deserialize(key, it->second);
-            }
+            if (it != sections.end()) scenes[i].deserialize(key, it->second);
         }
     };
 
-    parseScenes("FOREST", m_forests);
-    parseScenes("POND", m_ponds);
-    parseScenes("PASTURE", m_pastures);
-    parseScenes("FIELD", m_fields);
+    parseScenes("FOREST", m_forests, SceneType::FOREST);
+    parseScenes("POND", m_ponds, SceneType::POND);
+    parseScenes("PASTURE", m_pastures, SceneType::PASTURE);
+    parseScenes("FIELD", m_fields, SceneType::FIELD);
 
     addMessage("📂 配置已从 " + std::string(SAVE_FILE) + " 加载");
 }
