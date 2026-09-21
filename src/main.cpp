@@ -42,7 +42,7 @@ int main() {
     }
 
     // 控制台标题
-    SetConsoleTitleW(L"🍃 风种子 - 专注农场");
+    SetConsoleTitleW(L"🍃 风种子");
 
     // 注册控制台事件处理器，阻止直接关闭窗口
     SetConsoleCtrlHandler(ConsoleCtrlHandler, TRUE);

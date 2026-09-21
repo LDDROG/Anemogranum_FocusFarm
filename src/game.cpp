@@ -713,7 +713,7 @@ void Game::run() {
 
     // 后台天气刷新
     startWeatherService();
-    addMessage("🍃 又来力~");
+    addMessage("🍃 欢迎回来~");
 
     mainLoop();
 }
