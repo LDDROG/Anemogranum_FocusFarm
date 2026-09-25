@@ -107,6 +107,13 @@ struct FocusRecord {
 };
 
 
+struct Note {
+    std::chrono::system_clock::time_point time;
+    std::string title;
+    std::string content;
+};
+
+
 //场景
 class Scene {
 public:
@@ -258,6 +265,8 @@ public:
     std::string pestIntervalLabel() const;
 
     double focusInLast24h() const;
+    double todayFocusHours() const;
+    int fullStreak() const { return m_fullStreak; }
     void collectMature(Scene* sc);
 
     // 荣誉系统：月亮（连续5天满上限奖励）
@@ -276,6 +285,31 @@ public:
     int moonGodAnimTotal() const { return MOON_GOD_ANIM_TOTAL; }
     bool nightPaused() const { return m_nightPaused; }
 
+    bool inNotes() const { return m_inNotes; }
+    int noteCount() const { return (int)m_notes.size(); }
+    const std::vector<Note>& notes() const { return m_notes; }
+    std::vector<int> filteredNoteIndices() const;
+    int notePage() const { return m_notePage; }
+    int noteViewIdx() const { return m_noteViewIdx; }
+    bool noteDeleteConfirm() const { return m_noteDeleteConfirm; }
+    const std::string& noteTitleBuffer() const { return m_noteTitleBuffer; }
+    const std::string& noteContentBuffer() const { return m_noteContentBuffer; }
+    const std::string& noteInputBuffer() const { return m_noteInputBuffer; }
+    const std::string& noteFilterDate() const { return m_noteFilterDate; }
+    const std::string& noteFilterTitle() const { return m_noteFilterTitle; }
+    bool saveNotesToFile();
+    void loadNotesFromFile();
+
+    bool hasCountdown() const { return !m_countdownTargetDate.empty(); }
+    const std::string& countdownName() const { return m_countdownName; }
+    int countdownDaysLeft() const;
+    const std::string& countdownNameBuffer() const { return m_countdownNameBuffer; }
+    const std::string& countdownDaysBuffer() const { return m_countdownDaysBuffer; }
+    const std::string& countdownPendingName() const { return m_countdownPendingName; }
+
+    static constexpr int NOTE_PAGE_SIZE = 8;
+    static constexpr const char* NOTES_FILE = "focusfarm_notes.dat";
+
 private:
     Game();
     ~Game();
@@ -287,6 +321,7 @@ private:
     void renderUI();
 
     void addFocusRecord(double hours, const std::string& sceneName);
+    bool startNextFocusRound();
 
     std::vector<Scene>* scenesOf(SceneType type);
 
@@ -336,6 +371,24 @@ private:
     std::string m_renameBuffer;     // 重命名时正在编辑的新名称（独立，避免与按键缓冲职责冲突）
     bool m_nightPaused = false;     // 夜间暂停，等待用户确认恢复
     bool m_resumePrompted = false;  // 是否已提示恢复询问
+    int m_lastFocusMinutes = 25;
+
+    bool m_inNotes = false;
+    std::vector<Note> m_notes;
+    std::string m_noteTitleBuffer;
+    std::string m_noteContentBuffer;
+    std::string m_noteInputBuffer;
+    std::string m_noteFilterDate;
+    std::string m_noteFilterTitle;
+    int m_notePage = 0;
+    int m_noteViewIdx = -1;
+    bool m_noteDeleteConfirm = false;
+
+    std::string m_countdownName;
+    std::string m_countdownTargetDate;
+    std::string m_countdownNameBuffer;
+    std::string m_countdownDaysBuffer;
+    std::string m_countdownPendingName;
 
     bool m_uiDirty = true;
     int m_lastRenderSecond = -1;
@@ -355,6 +408,9 @@ void renderWarehouseUI(Game &game, std::ostringstream &ui);
 void renderHistoryUI(Game &game, std::ostringstream &ui);
 void renderFooter(Game &game, std::ostringstream &ui);
 void renderMoonGodUI(Game &game, std::ostringstream &ui);
+void renderNotesUI(Game &game, std::ostringstream &ui);
+
+std::string utf8Truncate(const std::string& s, size_t maxChars);
 
 // emoji工具声明
 std::string getTreeEmoji(TreeType t);

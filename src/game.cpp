@@ -12,6 +12,7 @@
 #include <map>
 #include <set>
 #include <sstream>
+#include <mutex>
 #include <windows.h>
 
 // 存档报错工具
@@ -145,16 +146,313 @@ std::string seasonLabel() {
     return "\xe2\x9d\x84\xef\xb8\x8f \xe5\x86\xac\xe5\xad\xa3";                       // ❄️ 冬季
 }
 
+static long long daysFromDate(int y, int m, int d) {
+    y -= (m <= 2) ? 1 : 0;
+    long long era = (y >= 0 ? y : y - 399) / 400;
+    long long yoe = y - era * 400;
+    long long doy = (153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + d - 1;
+    long long doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    return era * 146097LL + doe - 719468LL;
+}
+
+static void dateFromDays(long long z, int& y, int& m, int& d) {
+    z += 719468LL;
+    long long era = (z >= 0 ? z : z - 146096) / 146097;
+    long long doe = z - era * 146097;
+    long long yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    long long yy = yoe + era * 400;
+    long long doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    long long mp = (5 * doy + 2) / 153;
+    d = (int)(doy - (153 * mp + 2) / 5 + 1);
+    m = (int)(mp + (mp < 10 ? 3 : -9));
+    y = (int)(yy + (m <= 2 ? 1 : 0));
+}
+
 static long long dateKeyToDays(const std::string& key) {
     int y = 0, m = 0, d = 0;
     if (std::sscanf(key.c_str(), "%d-%d-%d", &y, &m, &d) != 3) return 0;
-    std::tm t = {};
-    t.tm_year = y - 1900;
-    t.tm_mon = m - 1;
-    t.tm_mday = d;
-    t.tm_hour = 12; 
-    std::time_t tt = std::mktime(&t);
-    return tt / 86400;
+    return daysFromDate(y, m, d);
+}
+
+static std::string dateKeyFromDays(long long days) {
+    int y = 0, m = 0, d = 0;
+    dateFromDays(days, y, m, d);
+    char buf[16];
+    std::snprintf(buf, sizeof(buf), "%04d-%02d-%02d", y, m, d);
+    return std::string(buf);
+}
+
+static std::string trimAscii(const std::string& s) {
+    size_t b = 0, e = s.size();
+    while (b < e && (unsigned char)s[b] <= 32) b++;
+    while (e > b && (unsigned char)s[e - 1] <= 32) e--;
+    return s.substr(b, e - b);
+}
+
+static bool isValidDateFilter(const std::string& v) {
+    if (v.size() != 4 && v.size() != 7 && v.size() != 10) return false;
+    for (size_t i = 0; i < v.size(); i++) {
+        if (i == 4 || i == 7) {
+            if (v[i] != '-') return false;
+        } else if (v[i] < '0' || v[i] > '9') {
+            return false;
+        }
+    }
+    return true;
+}
+
+static int parseSeqInput(const std::string& s) {
+    if (s.empty() || s.size() > 6) return -1;
+    for (size_t i = 0; i < s.size(); i++) {
+        if (s[i] < '0' || s[i] > '9') return -1;
+    }
+    return std::atoi(s.c_str());
+}
+
+static void popUtf8Char(std::string& s) {
+    if (s.empty()) return;
+    do {
+        s.pop_back();
+    } while (!s.empty() && ((unsigned char)s.back() & 0xC0) == 0x80);
+}
+
+std::string utf8Truncate(const std::string& s, size_t maxChars) {
+    size_t i = 0, n = 0;
+    while (i < s.size() && n < maxChars) {
+        unsigned char c = (unsigned char)s[i];
+        size_t len = 1;
+        if ((c & 0x80) == 0) len = 1;
+        else if ((c & 0xE0) == 0xC0) len = 2;
+        else if ((c & 0xF0) == 0xE0) len = 3;
+        else if ((c & 0xF8) == 0xF0) len = 4;
+        if (i + len > s.size()) break;
+        i += len;
+        n++;
+    }
+    return s.substr(0, i);
+}
+
+static std::string toLowerAscii(const std::string& s) {
+    std::string r = s;
+    for (size_t i = 0; i < r.size(); i++) {
+        unsigned char c = (unsigned char)r[i];
+        if (c >= 'A' && c <= 'Z') r[i] = (char)(c + 32);
+    }
+    return r;
+}
+
+static std::string escapeNoteText(const std::string& s) {
+    std::string out;
+    for (size_t i = 0; i < s.size(); i++) {
+        char c = s[i];
+        if (c == '\\') out += "\\\\";
+        else if (c == '\n') out += "\\n";
+        else if (c == '\r') out += "\\r";
+        else out += c;
+    }
+    return out;
+}
+
+static std::string unescapeNoteText(const std::string& s) {
+    std::string out;
+    for (size_t i = 0; i < s.size(); i++) {
+        if (s[i] == '\\' && i + 1 < s.size()) {
+            char n = s[i + 1];
+            if (n == 'n') { out += '\n'; i++; }
+            else if (n == 'r') { out += '\r'; i++; }
+            else if (n == '\\') { out += '\\'; i++; }
+            else out += s[i];
+        } else {
+            out += s[i];
+        }
+    }
+    return out;
+}
+
+static std::string formatTimePoint(std::chrono::system_clock::time_point tp) {
+    std::time_t t = std::chrono::system_clock::to_time_t(tp);
+    std::tm tm_info;
+    localtime_s(&tm_info, &t);
+    char buf[32];
+    std::snprintf(buf, sizeof(buf), "%04d-%02d-%02d %02d:%02d",
+                  tm_info.tm_year + 1900, tm_info.tm_mon + 1, tm_info.tm_mday,
+                  tm_info.tm_hour, tm_info.tm_min);
+    return std::string(buf);
+}
+
+static std::mutex g_saveMutex;
+
+static bool writeFileAtomic(const std::string& path, const std::string& content) {
+    std::string tmp = path + ".tmp";
+    {
+        std::ofstream ofs(tmp.c_str(), std::ios::binary | std::ios::trunc);
+        if (!ofs) return false;
+        if (!content.empty()) {
+            ofs.write(content.data(), (std::streamsize)content.size());
+        }
+        if (!ofs.good()) {
+            ofs.close();
+            std::remove(tmp.c_str());
+            return false;
+        }
+        ofs.close();
+        if (ofs.fail()) {
+            std::remove(tmp.c_str());
+            return false;
+        }
+    }
+    if (!MoveFileExA(tmp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING)) {
+        std::remove(tmp.c_str());
+        return false;
+    }
+    return true;
+}
+
+static std::wstring toWide(const std::string& s) {
+    if (s.empty()) return std::wstring();
+    int n = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), (int)s.size(), NULL, 0);
+    if (n <= 0) return std::wstring();
+    std::wstring w((size_t)n, L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, s.c_str(), (int)s.size(), &w[0], n);
+    return w;
+}
+
+struct ChoiceDialogState {
+    int result = 0;
+};
+
+static LRESULT CALLBACK noKeyButtonProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    WNDPROC old = (WNDPROC)GetWindowLongPtrW(hwnd, GWLP_USERDATA);
+    if (msg == WM_KEYDOWN || msg == WM_KEYUP || msg == WM_CHAR ||
+        msg == WM_SYSCHAR || msg == WM_SYSKEYDOWN || msg == WM_SYSKEYUP) {
+        return 0;
+    }
+    if (old) return CallWindowProcW(old, hwnd, msg, wp, lp);
+    return DefWindowProcW(hwnd, msg, wp, lp);
+}
+
+static LRESULT CALLBACK choiceDialogProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    ChoiceDialogState* st = (ChoiceDialogState*)GetWindowLongPtrW(hwnd, GWLP_USERDATA);
+    switch (msg) {
+        case WM_CREATE: {
+            CREATESTRUCTW* cs = (CREATESTRUCTW*)lp;
+            SetWindowLongPtrW(hwnd, GWLP_USERDATA, (LONG_PTR)cs->lpCreateParams);
+            return 0;
+        }
+        case WM_COMMAND:
+            if (st) st->result = (int)LOWORD(wp);
+            DestroyWindow(hwnd);
+            return 0;
+        case WM_KEYDOWN:
+        case WM_CHAR:
+            return 0;
+        case WM_CLOSE:
+            if (st) st->result = 0;
+            DestroyWindow(hwnd);
+            return 0;
+        case WM_DESTROY:
+            PostQuitMessage(0);
+            return 0;
+        default:
+            break;
+    }
+    return DefWindowProcW(hwnd, msg, wp, lp);
+}
+
+static int showChoiceDialog(const std::string& titleUtf8, const std::string& textUtf8,
+                            const std::string& btn1Utf8, const std::string& btn2Utf8) {
+    HINSTANCE hInst = GetModuleHandleW(NULL);
+    const wchar_t* clsName = L"FocusFarmChoiceWnd";
+
+    static bool clsReady = false;
+    if (!clsReady) {
+        WNDCLASSEXW wc = {};
+        wc.cbSize = sizeof(WNDCLASSEXW);
+        wc.style = CS_HREDRAW | CS_VREDRAW;
+        wc.lpfnWndProc = choiceDialogProc;
+        wc.hInstance = hInst;
+        wc.hCursor = LoadCursor(NULL, IDC_ARROW);
+        wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
+        wc.lpszClassName = clsName;
+        if (!RegisterClassExW(&wc)) return 0;
+        clsReady = true;
+    }
+
+    static HFONT sFont = NULL;
+    if (!sFont) {
+        sFont = CreateFontW(-18, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                            CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE,
+                            L"Microsoft YaHei UI");
+        if (!sFont) sFont = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
+    }
+
+    const int W = 460, H = 240;
+    int sw = GetSystemMetrics(SM_CXSCREEN);
+    int sh = GetSystemMetrics(SM_CYSCREEN);
+    int x = (sw - W) / 2;
+    int y = (sh - H) / 2;
+    if (x < 0) x = 0;
+    if (y < 0) y = 0;
+
+    ChoiceDialogState st;
+    std::wstring wt = toWide(titleUtf8);
+    std::wstring wm = toWide(textUtf8);
+    std::wstring wb1 = toWide(btn1Utf8);
+    std::wstring wb2 = toWide(btn2Utf8);
+
+    HWND hwnd = CreateWindowExW(WS_EX_TOPMOST, clsName, wt.c_str(),
+                                WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
+                                x, y, W, H, NULL, NULL, hInst, &st);
+    if (!hwnd) return 0;
+
+    HWND hText = CreateWindowExW(0, L"STATIC", wm.c_str(),
+                                 WS_CHILD | WS_VISIBLE | SS_CENTER | SS_CENTERIMAGE,
+                                 20, 20, W - 40, 110, hwnd, NULL, hInst, NULL);
+    HWND hB1 = CreateWindowExW(0, L"BUTTON", wb1.c_str(),
+                               WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                               W / 2 - 160, 150, 140, 40, hwnd, (HMENU)1001, hInst, NULL);
+    HWND hB2 = CreateWindowExW(0, L"BUTTON", wb2.c_str(),
+                               WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                               W / 2 + 20, 150, 140, 40, hwnd, (HMENU)1002, hInst, NULL);
+
+    if (sFont) {
+        SendMessageW(hText, WM_SETFONT, (WPARAM)sFont, TRUE);
+        SendMessageW(hB1, WM_SETFONT, (WPARAM)sFont, TRUE);
+        SendMessageW(hB2, WM_SETFONT, (WPARAM)sFont, TRUE);
+    }
+    if (hB1) {
+        SetWindowLongPtrW(hB1, GWLP_USERDATA,
+            (LONG_PTR)SetWindowLongPtrW(hB1, GWLP_WNDPROC, (LONG_PTR)noKeyButtonProc));
+    }
+    if (hB2) {
+        SetWindowLongPtrW(hB2, GWLP_USERDATA,
+            (LONG_PTR)SetWindowLongPtrW(hB2, GWLP_WNDPROC, (LONG_PTR)noKeyButtonProc));
+    }
+
+    ShowWindow(hwnd, SW_SHOW);
+    UpdateWindow(hwnd);
+
+    HWND hFore = GetForegroundWindow();
+    DWORD tidFore = hFore ? GetWindowThreadProcessId(hFore, NULL) : 0;
+    DWORD tidCur = GetCurrentThreadId();
+    if (tidFore != 0 && tidFore != tidCur) AttachThreadInput(tidFore, tidCur, TRUE);
+    SetForegroundWindow(hwnd);
+    BringWindowToTop(hwnd);
+    SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
+    SetFocus(hwnd);
+    if (tidFore != 0 && tidFore != tidCur) AttachThreadInput(tidFore, tidCur, FALSE);
+
+    MSG msg;
+    while (GetMessageW(&msg, NULL, 0, 0) > 0) {
+        TranslateMessage(&msg);
+        DispatchMessageW(&msg);
+    }
+
+    FlushConsoleInputBuffer(GetStdHandle(STD_INPUT_HANDLE));
+    HWND hConsole = GetConsoleWindow();
+    if (hConsole) SetForegroundWindow(hConsole);
+    return st.result;
 }
 
 // LLLLLLLLDDDDDDDDDDDDDDDDDDDD emoji映射
@@ -254,7 +552,7 @@ PomodoroTimer::PomodoroTimer()
 void PomodoroTimer::startFocus(int minutes) 
 {
     if (minutes < 5) minutes = 5;
-    if (minutes > 120) minutes = 120;
+    if (minutes > 210) minutes = 210;
     m_total = minutes * 60;
     m_remaining = m_total;
     m_state = State::FOCUSING;
@@ -650,6 +948,7 @@ std::vector<Scene>* Game::scenesOf(SceneType type) {
 
 std::string Game::pageLabel() {
     if (m_showMoonGod) return "月神降临";
+    if (m_inNotes) return "笔记";
     if (m_inMarket) return "集市";
     if (m_inWarehouse) return "仓库";
     if (m_inHistory) return "专注记录";
@@ -695,6 +994,8 @@ void Game::run() {
         std::cout << "⚠ 存档文件损坏，无法加载！" << std::endl;
         std::cout << "  原因：" << e.what() << std::endl;
         std::cout << "  请修复 " << SAVE_FILE << " 后重新运行。" << std::endl;
+        std::cout << "  （程序已停止，未对存档做任何写入；如需重新开始，可删除该文件，"
+                     "但会丢失全部进度）" << std::endl;
         std::cout << std::endl << "  按任意键退出..." << std::flush;
         system("pause");
         std::exit(1);
@@ -713,6 +1014,7 @@ void Game::run() {
 
     // 后台天气刷新
     startWeatherService();
+    loadNotesFromFile();
     addMessage("🍃 欢迎回来~");
 
     mainLoop();
@@ -836,6 +1138,25 @@ void Game::processInput() {
 
             if (m_inputMode > 0) continue;
 
+            if (m_inNotes) {
+                if (m_noteViewIdx >= 0) {
+                    if (code == 72 || code == 80 || code == 75 || code == 77) {
+                        m_noteViewIdx = -1;
+                        m_noteDeleteConfirm = false;
+                    }
+                } else {
+                    int total = (int)filteredNoteIndices().size();
+                    int pages = (total + NOTE_PAGE_SIZE - 1) / NOTE_PAGE_SIZE;
+                    if (pages < 1) pages = 1;
+                    if (code == 72) {
+                        if (m_notePage > 0) m_notePage--;
+                    } else if (code == 80) {
+                        if (m_notePage + 1 < pages) m_notePage++;
+                    }
+                }
+                continue;
+            }
+
             if (m_inMainMenu) {
                 if (code == 75) { 
                     int typeIdx = static_cast<int>(m_currentSceneType) - 1;
@@ -863,7 +1184,7 @@ void Game::processInput() {
                 continue;
             }
 
-            if (!m_inMarket && !m_inWarehouse && !m_inHistory && !m_inMainMenu) {
+            if (!m_inMarket && !m_inWarehouse && !m_inHistory && !m_inMainMenu && !m_inNotes) {
                 SceneType type = m_currentSceneType;
                 int count = getSceneCount(*this, type);
                 if (code == 72) {
@@ -889,13 +1210,33 @@ void Game::processInput() {
             continue;
         }
 
-        if ((ch == 'q' || ch == 'Q') && m_inputMode != 6) {
+        if ((ch == 'q' || ch == 'Q') && m_inputMode != 6 && m_inputMode != 11 && m_inputMode < 13) {
             saveToFile();
             m_running = false;
             return;
         }
 
-        if (m_inMainMenu && m_inputMode == 0) {
+        if (m_inputMode == 0 && !m_inNotes) {
+            if (ch == 'n' || ch == 'N') {
+                m_inNotes = true;
+                m_noteViewIdx = -1;
+                m_noteDeleteConfirm = false;
+                m_notePage = 0;
+                m_noteInputBuffer.clear();
+                m_uiDirty = true;
+                continue;
+            }
+            if (ch == 't' || ch == 'T') {
+                m_countdownNameBuffer.clear();
+                m_countdownDaysBuffer.clear();
+                m_countdownPendingName.clear();
+                addMessage("⏳ 设置倒计时：请输入事件名称（留空回车=清除倒计时）");
+                m_inputMode = 18;
+                continue;
+            }
+        }
+
+        if (m_inMainMenu && m_inputMode == 0 && !m_inNotes) {
             switch (ch) {
                 case '\r': case '\n': case ' ': 
                 {
@@ -945,7 +1286,7 @@ void Game::processInput() {
                     continue;
                 }
                 case 'x': case 'X':
-                    addMessage("⚠ 确认重置整个系统？所有数据将丢失！[Y]确认 [其他键]取消");
+                    addMessage("⚠ 确认重置整个系统？游戏进度将全部丢失（笔记与倒计时保留）[Y]确认 [其他键]取消");
                     m_inputMode = 9;
                     continue;
                 case '1': case '2': case '3': case '4': {
@@ -961,7 +1302,7 @@ void Game::processInput() {
         }
 
         // 集市模式
-        if (m_inMarket) {
+        if (m_inMarket && m_inputMode == 0 && !m_inNotes) {
             switch (ch) {
                 case 'b': case 'B':
                     m_inMarket = false;
@@ -996,7 +1337,7 @@ void Game::processInput() {
         }
 
         // 仓库模式
-        if (m_inWarehouse) {
+        if (m_inWarehouse && m_inputMode == 0 && !m_inNotes) {
             switch (ch) {
                 case 'b': case 'B':
                     m_inWarehouse = false;
@@ -1070,12 +1411,258 @@ void Game::processInput() {
             continue;
         }
 
-        if (m_inHistory) {
+        if (m_inHistory && m_inputMode == 0 && !m_inNotes) {
             switch (ch) {
                 case 'b': case 'B':
                     m_inHistory = false;
                     m_inMainMenu = true;
                     break;
+            }
+            continue;
+        }
+
+        if (m_inNotes && (m_inputMode == 0 || (m_inputMode >= 13 && m_inputMode <= 20))) {
+            switch (m_inputMode) {
+                case 13: {
+                    if (ch == 27) {
+                        m_noteTitleBuffer.clear();
+                        m_noteContentBuffer.clear();
+                        m_inputMode = 0;
+                        addMessage("❌ 已取消新建笔记");
+                    } else if (ch == '\r' || ch == '\n') {
+                        if (m_noteTitleBuffer.empty()) {
+                            m_noteTitleBuffer = formatTimePoint(std::chrono::system_clock::now()) + " 的笔记";
+                        }
+                        m_noteContentBuffer.clear();
+                        m_inputMode = 14;
+                        addMessage("📝 请输入正文（Enter 换行，Ctrl+S 保存，Esc 取消）");
+                    } else if (ch == '\b' || ch == 127) {
+                        popUtf8Char(m_noteTitleBuffer);
+                    } else if (ch >= 32) {
+                        m_noteTitleBuffer += (char)ch;
+                    }
+                    break;
+                }
+                case 14: {
+                    if (ch == 0x13) {
+                        if (m_noteContentBuffer.empty()) {
+                            addMessage("❌ 正文为空，无法保存（Esc 取消）");
+                            break;
+                        }
+                        Note n;
+                        n.time = std::chrono::system_clock::now();
+                        n.title = m_noteTitleBuffer;
+                        n.content = m_noteContentBuffer;
+                        while (!n.content.empty() &&
+                               (n.content.back() == '\n' || n.content.back() == '\r')) {
+                            n.content.pop_back();
+                        }
+                        m_notes.push_back(n);
+                        bool saved = saveNotesToFile();
+                        m_noteTitleBuffer.clear();
+                        m_noteContentBuffer.clear();
+                        m_inputMode = 0;
+                        m_notePage = 0;
+                        if (saved) addMessage("📝 笔记已保存：" + n.title);
+                        else addMessage("⚠ 笔记仅存在于本次运行中，写入文件失败！");
+                    } else if (ch == 27) {
+                        m_noteTitleBuffer.clear();
+                        m_noteContentBuffer.clear();
+                        m_inputMode = 0;
+                        addMessage("❌ 已取消新建笔记");
+                    } else if (ch == '\r' || ch == '\n') {
+                        m_noteContentBuffer += '\n';
+                    } else if (ch == '\b' || ch == 127) {
+                        popUtf8Char(m_noteContentBuffer);
+                    } else if (ch >= 32) {
+                        m_noteContentBuffer += (char)ch;
+                    }
+                    break;
+                }
+                case 15: {
+                    if (ch == 27) {
+                        m_noteInputBuffer.clear();
+                        m_inputMode = 0;
+                        addMessage("❌ 已取消时间筛选");
+                    } else if (ch == '\r' || ch == '\n') {
+                        std::string v = trimAscii(m_noteInputBuffer);
+                        if (v.empty()) {
+                            m_noteFilterDate.clear();
+                            addMessage("🔎 已清除时间筛选");
+                        } else if (isValidDateFilter(v)) {
+                            m_noteFilterDate = v;
+                            addMessage("🔎 时间筛选：" + v);
+                        } else {
+                            addMessage("❌ 日期格式无效，请用 YYYY-MM-DD / YYYY-MM / YYYY");
+                        }
+                        m_noteInputBuffer.clear();
+                        m_inputMode = 0;
+                        m_notePage = 0;
+                    } else if (ch == '\b' || ch == 127) {
+                        popUtf8Char(m_noteInputBuffer);
+                    } else if (ch >= 32) {
+                        m_noteInputBuffer += (char)ch;
+                    }
+                    break;
+                }
+                case 16: {
+                    if (ch == 27) {
+                        m_noteInputBuffer.clear();
+                        m_inputMode = 0;
+                        addMessage("❌ 已取消标题搜索");
+                    } else if (ch == '\r' || ch == '\n') {
+                        std::string v = trimAscii(m_noteInputBuffer);
+                        if (v.empty()) {
+                            m_noteFilterTitle.clear();
+                            addMessage("🔎 已清除标题搜索");
+                        } else {
+                            m_noteFilterTitle = v;
+                            addMessage("🔎 标题搜索：" + v);
+                        }
+                        m_noteInputBuffer.clear();
+                        m_inputMode = 0;
+                        m_notePage = 0;
+                    } else if (ch == '\b' || ch == 127) {
+                        popUtf8Char(m_noteInputBuffer);
+                    } else if (ch >= 32) {
+                        m_noteInputBuffer += (char)ch;
+                    }
+                    break;
+                }
+                case 17: {
+                    if (ch == 27) {
+                        m_noteInputBuffer.clear();
+                        m_inputMode = 0;
+                        addMessage("❌ 已取消删除");
+                    } else if (ch == '\r' || ch == '\n') {
+                        int seq = parseSeqInput(m_noteInputBuffer);
+                        std::vector<int> idxs = filteredNoteIndices();
+                        if (seq >= 1 && seq <= (int)idxs.size()) {
+                            int real = idxs[seq - 1];
+                            std::string nm = m_notes[real].title;
+                            m_notes.erase(m_notes.begin() + real);
+                            bool saved = saveNotesToFile();
+                            addMessage("🗑 已删除笔记：" + nm);
+                            if (!saved) addMessage("⚠ 删除结果写入文件失败，重启后该笔记可能仍在");
+                            m_noteViewIdx = -1;
+                        } else {
+                            addMessage("❌ 序号无效");
+                        }
+                        m_noteInputBuffer.clear();
+                        m_inputMode = 0;
+                        m_notePage = 0;
+                    } else if (ch == '\b' || ch == 127) {
+                        if (!m_noteInputBuffer.empty()) m_noteInputBuffer.pop_back();
+                    } else if (ch >= '0' && ch <= '9') {
+                        m_noteInputBuffer += (char)ch;
+                    }
+                    break;
+                }
+                case 20: {
+                    if (ch == 27) {
+                        m_noteInputBuffer.clear();
+                        m_inputMode = 0;
+                        addMessage("❌ 已取消查看");
+                    } else if (ch == '\r' || ch == '\n') {
+                        int seq = parseSeqInput(m_noteInputBuffer);
+                        std::vector<int> idxs = filteredNoteIndices();
+                        if (seq >= 1 && seq <= (int)idxs.size()) {
+                            m_noteViewIdx = idxs[seq - 1];
+                        } else {
+                            addMessage("❌ 序号无效");
+                        }
+                        m_noteInputBuffer.clear();
+                        m_inputMode = 0;
+                    } else if (ch == '\b' || ch == 127) {
+                        if (!m_noteInputBuffer.empty()) m_noteInputBuffer.pop_back();
+                    } else if (ch >= '0' && ch <= '9') {
+                        m_noteInputBuffer += (char)ch;
+                    }
+                    break;
+                }
+                default: {
+                    if (m_noteViewIdx >= 0) {
+                        if (m_noteDeleteConfirm) {
+                            if (ch == 'y' || ch == 'Y') {
+                                if (m_noteViewIdx < (int)m_notes.size()) {
+                                    std::string nm = m_notes[m_noteViewIdx].title;
+                                    m_notes.erase(m_notes.begin() + m_noteViewIdx);
+                                    bool saved = saveNotesToFile();
+                                    addMessage("🗑 已删除笔记：" + nm);
+                                    if (!saved) addMessage("⚠ 删除结果写入文件失败，重启后该笔记可能仍在");
+                                }
+                                m_noteViewIdx = -1;
+                                m_notePage = 0;
+                            } else {
+                                addMessage("❌ 已取消删除");
+                            }
+                            m_noteDeleteConfirm = false;
+                        } else if (ch == 'd' || ch == 'D') {
+                            m_noteDeleteConfirm = true;
+                        } else {
+                            m_noteViewIdx = -1;
+                        }
+                        break;
+                    }
+                    switch (ch) {
+                        case 'n': case 'N':
+                            m_noteTitleBuffer.clear();
+                            m_noteContentBuffer.clear();
+                            addMessage("📝 请输入笔记标题（留空回车=用当前时间作标题）");
+                            m_inputMode = 13;
+                            break;
+                        case 'v': case 'V':
+                            if (m_notes.empty()) {
+                                addMessage("❌ 还没有笔记");
+                                break;
+                            }
+                            m_noteInputBuffer.clear();
+                            addMessage("📖 输入要查看的笔记序号，回车确认");
+                            m_inputMode = 20;
+                            break;
+                        case 'd': case 'D':
+                            if (m_notes.empty()) {
+                                addMessage("❌ 还没有笔记");
+                                break;
+                            }
+                            m_noteInputBuffer.clear();
+                            addMessage("🗑 输入要删除的笔记序号，回车确认");
+                            m_inputMode = 17;
+                            break;
+                        case 'f': case 'F':
+                            m_noteInputBuffer.clear();
+                            addMessage("🔎 输入日期筛选（YYYY-MM-DD / YYYY-MM / YYYY，留空回车=清除）");
+                            m_inputMode = 15;
+                            break;
+                        case 'g': case 'G':
+                            m_noteInputBuffer.clear();
+                            addMessage("🔎 输入标题关键词（留空回车=清除）");
+                            m_inputMode = 16;
+                            break;
+                        case 'c': case 'C':
+                            m_noteFilterDate.clear();
+                            m_noteFilterTitle.clear();
+                            m_notePage = 0;
+                            addMessage("🔎 已清除全部筛选");
+                            break;
+                        case 't': case 'T':
+                            m_countdownNameBuffer.clear();
+                            m_countdownDaysBuffer.clear();
+                            m_countdownPendingName.clear();
+                            addMessage("⏳ 设置倒计时：请输入事件名称（留空回车=清除倒计时）");
+                            m_inputMode = 18;
+                            break;
+                        case 27:
+                        case 'b': case 'B':
+                            m_inNotes = false;
+                            m_noteViewIdx = -1;
+                            m_noteDeleteConfirm = false;
+                            break;
+                        default:
+                            break;
+                    }
+                    break;
+                }
             }
             continue;
         }
@@ -1123,7 +1710,7 @@ void Game::processInput() {
                     break;
                 }
                 // 预设专注时长：10, 20, 30, 40, 60, 90, 120分钟
-                addMessage("\xe2\x8f\xb1 \xe8\xaf\xb7\xe9\x80\x89\xe6\x8b\xa9\xe4\xb8\x93\xe6\xb3\xa8\xe6\x97\xb6\xe9\x95\xbf: [A]10min [B]20min [C]30min [D]40min [E]1h [F]1.5h [G]2h");
+                addMessage("\xe2\x8f\xb1 \xe8\xaf\xb7\xe9\x80\x89\xe6\x8b\xa9\xe4\xb8\x93\xe6\xb3\xa8\xe6\x97\xb6\xe9\x95\xbf: [A]10min [B]20min [C]30min [D]40min [E]1h [F]1.5h [G]2h [H]3.5h");
                 m_inputMode = 1;
                 break;
             }
@@ -1249,7 +1836,7 @@ void Game::processInput() {
             }
             case 'x': case 'X': {
                 // 系统重置
-                addMessage("⚠ 确认重置整个系统？所有数据将丢失！[Y]确认 [其他键]取消");
+                addMessage("⚠ 确认重置整个系统？游戏进度将全部丢失（笔记与倒计时保留）[Y]确认 [其他键]取消");
                 m_inputMode = 9;
                 continue;
             }
@@ -1273,10 +1860,12 @@ void Game::processInput() {
                         case 'e': case 'E': minutes = 60; break;
                         case 'f': case 'F': minutes = 90; break;
                         case 'g': case 'G': minutes = 120; break;
+                        case 'h': case 'H': minutes = 210; break;
                         default: m_inputMode = 0; break;
                     }
                     if (minutes > 0) {
                         m_timer.startFocus(minutes);
+                        m_lastFocusMinutes = minutes;
                         m_focusSceneType = m_currentSceneType;
                         m_focusSceneIndex = m_currentSceneIndex;
                         m_nightPaused = false;
@@ -1481,6 +2070,71 @@ void Game::processInput() {
                     m_inputMode = 0;
                     break;
                 }
+                case 18: {
+                    if (ch == 27) {
+                        m_countdownNameBuffer.clear();
+                        m_inputMode = 0;
+                        addMessage("❌ 已取消设置倒计时");
+                    } else if (ch == '\r' || ch == '\n') {
+                        if (m_countdownNameBuffer.empty()) {
+                            m_countdownName.clear();
+                            m_countdownTargetDate.clear();
+                            m_countdownPendingName.clear();
+                            m_countdownDaysBuffer.clear();
+                            m_inputMode = 0;
+                            saveToFile();
+                            addMessage("⏳ 已清除倒计时");
+                        } else {
+                            m_countdownPendingName = m_countdownNameBuffer;
+                            m_countdownNameBuffer.clear();
+                            m_countdownDaysBuffer.clear();
+                            m_inputMode = 19;
+                            addMessage("⏳ 请输入距离「" + m_countdownPendingName + "」还有多少天，或直接输入目标日期 YYYY-MM-DD");
+                        }
+                    } else if (ch == '\b' || ch == 127) {
+                        popUtf8Char(m_countdownNameBuffer);
+                    } else if (ch >= 32) {
+                        m_countdownNameBuffer += (char)ch;
+                    }
+                    break;
+                }
+                case 19: {
+                    if (ch == 27) {
+                        m_countdownNameBuffer.clear();
+                        m_countdownDaysBuffer.clear();
+                        m_countdownPendingName.clear();
+                        m_inputMode = 0;
+                        addMessage("❌ 已取消设置倒计时");
+                    } else if (ch == '\r' || ch == '\n') {
+                        std::string v = trimAscii(m_countdownDaysBuffer);
+                        bool byDate = isValidDateFilter(v);
+                        int days = byDate ? 0 : parseSeqInput(v);
+                        if (!byDate && (days <= 0 || days > 9999)) {
+                            addMessage("❌ 请输入 1-9999 之间的天数，或 YYYY-MM-DD 格式的日期");
+                            m_countdownDaysBuffer.clear();
+                        } else {
+                            m_countdownName = m_countdownPendingName;
+                            if (byDate) {
+                                m_countdownTargetDate = v;
+                            } else {
+                                m_countdownTargetDate = dateKeyFromDays(dateKeyToDays(todayDateKey()) + days);
+                            }
+                            int left = (int)(dateKeyToDays(m_countdownTargetDate) - dateKeyToDays(todayDateKey()));
+                            m_countdownNameBuffer.clear();
+                            m_countdownDaysBuffer.clear();
+                            m_countdownPendingName.clear();
+                            m_inputMode = 0;
+                            saveToFile();
+                            addMessage("⏳ 倒计时已设置：距「" + m_countdownName + "」还有 " +
+                                       std::to_string(left) + " 天");
+                        }
+                    } else if (ch == '\b' || ch == 127) {
+                        if (!m_countdownDaysBuffer.empty()) m_countdownDaysBuffer.pop_back();
+                    } else if ((ch >= '0' && ch <= '9') || ch == '-') {
+                        m_countdownDaysBuffer += (char)ch;
+                    }
+                    break;
+                }
             }
         }
     }
@@ -1498,7 +2152,7 @@ void Game::updateGame() {
     } else {
         if (m_nightPaused && m_timer.state() != PomodoroTimer::State::IDLE) {
             m_timer.pauseTick();
-            if (!m_resumePrompted) {
+            if (!m_resumePrompted && (m_inputMode == 0 || m_inputMode == 10)) {
                 m_resumePrompted = true;
                 addMessage("🌞 天亮了！是否继续计时？[Y]继续 [N]停止");
                 m_inputMode = 10;
@@ -1533,14 +2187,34 @@ void Game::updateGame() {
                 collectMature(sc);
 
                 m_timer.stop();
-                addMessage("\xf0\x9f\x98\xb4 \xe8\xa6\x81\xe4\xbc\x91\xe6\x81\xaf\xe4\xb8\x80\xe4\xb8\x8b\xe5\x90\x97\xef\xbc\x9f [A]5min [B]10min [C]15min [D]20min \xe6\x88\x96\xe4\xbb\xbb\xe6\x84\x8f\xe9\x94\xae\xe8\xb7\xb3\xe8\xbf\x87");
-                m_inputMode = 7;
+                if (m_inputMode < 13 || m_inputMode > 20) m_inputMode = 0;
+
+                int choice = showChoiceDialog("休息一下？",
+                                              "番茄钟计时结束，要休息一下吗？",
+                                              "休息", "继续干活");
+                if (choice == 1001) {
+                    m_timer.startRest(5);
+                    addMessage("😴 开始休息 5 分钟");
+                } else if (choice == 1002) {
+                    startNextFocusRound();
+                } else {
+                    addMessage("⏹ 未选择，计时已停止");
+                }
             } else if (m_timer.finishedAs() == PomodoroTimer::State::RESTING) {
                 m_timer.stop();
+                if (m_inputMode < 13 || m_inputMode > 20) m_inputMode = 0;
                 addMessage("\xf0\x9f\x94\x94 \xe4\xbc\x91\xe6\x81\xaf\xe6\x97\xb6\xe9\x97\xb4\xe7\xbb\x93\xe6\x9d\x9f\xef\xbc\x81");
-                addMessage("\xe2\x8f\xb1 \xe7\xbb\xa7\xe7\xbb\xad\xe4\xb8\x93\xe6\xb3\xa8\xef\xbc\x9f [A]10min [B]20min [C]30min [D]40min [E]1h [F]1.5h [G]2h \xe6\x88\x96\xe4\xbb\xbb\xe6\x84\x8f\xe9\x94\xae\xe8\xb7\xb3\xe8\xbf\x87");
-                m_inputMode = 1;
+
+                int choice = showChoiceDialog("休息够了吗？",
+                                              "休息结束~ 继续干活吗？",
+                                              "继续干活", "取消");
+                if (choice == 1001) {
+                    startNextFocusRound();
+                } else {
+                    addMessage("⏹ 已取消，未启动专注");
+                }
             }
+            m_uiDirty = true;
         }
     }
 
@@ -1613,6 +2287,14 @@ std::string Game::pestIntervalLabel() const {
     if (m_pestIntervalHours == 24.0) return "24h (\xe9\xab\x98\xe5\x8e\x8b\xe5\x8a\x9b)";
     if (m_pestIntervalHours == 48.0) return "48h (\xe4\xb8\xad\xe7\xad\x89\xe5\x8e\x8b\xe5\x8a\x9b)";
     return "72h (\xe4\xbd\x8e\xe5\x8e\x8b\xe5\x8a\x9b)";
+}
+
+double Game::todayFocusHours() const {
+    std::string key = todayDateKey();
+    for (const auto& p : m_dailyFocus) {
+        if (p.first == key) return p.second;
+    }
+    return 0.0;
 }
 
 double Game::focusInLast24h() const {
@@ -1760,28 +2442,148 @@ bool Game::summonMoonGod() {
     return true;
 }
 
+bool Game::startNextFocusRound() {
+    Scene* tsc = getScene(m_focusSceneType, m_focusSceneIndex);
+    if (!tsc) tsc = currentScene();
+    if (!tsc || !tsc->currentObject() || tsc->currentObject()->isMature()) {
+        addMessage("⚠ 当前场景没有可专注的物体，请先按 3 种植新物体");
+        return false;
+    }
+    m_timer.startFocus(m_lastFocusMinutes);
+    m_nightPaused = false;
+    m_resumePrompted = false;
+    addMessage("▶ 新一轮专注开始 " + std::to_string(m_lastFocusMinutes) + " 分钟");
+    return true;
+}
+
+int Game::countdownDaysLeft() const {
+    if (m_countdownTargetDate.empty()) return 0;
+    return (int)(dateKeyToDays(m_countdownTargetDate) - dateKeyToDays(todayDateKey()));
+}
+
+std::vector<int> Game::filteredNoteIndices() const {
+    std::vector<int> out;
+    if (m_notes.empty()) return out;
+    for (int i = (int)m_notes.size() - 1; i >= 0; i--) {
+        const Note& n = m_notes[i];
+        if (!m_noteFilterDate.empty()) {
+            std::string key = dateKeyOf(n.time);
+            if (m_noteFilterDate.size() > key.size()) continue;
+            if (key.compare(0, m_noteFilterDate.size(), m_noteFilterDate) != 0) continue;
+        }
+        if (!m_noteFilterTitle.empty()) {
+            std::string lowerKey = toLowerAscii(m_noteFilterTitle);
+            std::string lowerTitle = toLowerAscii(n.title);
+            if (lowerTitle.find(lowerKey) == std::string::npos) continue;
+        }
+        out.push_back(i);
+    }
+    return out;
+}
+
+bool Game::saveNotesToFile() {
+    std::ostringstream oss;
+    oss << "# FocusFarm 笔记文件\n";
+    oss << "# 每条笔记以 [note] 开头，包含 time / title / content 三个字段\n\n";
+    for (size_t i = 0; i < m_notes.size(); i++) {
+        oss << "[note]\n";
+        oss << "time=" << std::chrono::duration_cast<std::chrono::seconds>(
+            m_notes[i].time.time_since_epoch()).count() << "\n";
+        oss << "title=" << escapeNoteText(m_notes[i].title) << "\n";
+        oss << "content=" << escapeNoteText(m_notes[i].content) << "\n\n";
+    }
+
+    std::lock_guard<std::mutex> lk(g_saveMutex);
+    if (!writeFileAtomic(NOTES_FILE, oss.str())) {
+        addMessage("❌ 笔记保存失败！请检查文件是否被占用或磁盘空间不足");
+        return false;
+    }
+    return true;
+}
+
+void Game::loadNotesFromFile() {
+    std::ifstream ifs(NOTES_FILE);
+    if (!ifs) {
+        if (GetFileAttributesA(NOTES_FILE) != INVALID_FILE_ATTRIBUTES) {
+            std::string bak = std::string(NOTES_FILE) + ".bak";
+            std::remove(bak.c_str());
+            if (std::rename(NOTES_FILE, bak.c_str()) == 0) {
+                addMessage("⚠ 笔记文件无法读取，已原样备份为 " + bak);
+            }
+        }
+        return;
+    }
+
+    m_notes.clear();
+    std::string line;
+    Note cur;
+    bool inNote = false;
+    bool hasField = false;
+    bool sawNoteMarker = false;
+
+    while (std::getline(ifs, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        if (line.empty() || line[0] == '#') continue;
+        if (line == "[note]") {
+            if (inNote && hasField) m_notes.push_back(cur);
+            cur = Note();
+            inNote = true;
+            hasField = false;
+            sawNoteMarker = true;
+            continue;
+        }
+        if (!inNote) continue;
+        if (line.compare(0, 5, "time=") == 0) {
+            long long secs = 0;
+            try { secs = std::stoll(line.substr(5)); } catch (...) { secs = 0; }
+            cur.time = std::chrono::system_clock::time_point(std::chrono::seconds(secs));
+            hasField = true;
+        } else if (line.compare(0, 6, "title=") == 0) {
+            cur.title = unescapeNoteText(line.substr(6));
+            hasField = true;
+        } else if (line.compare(0, 8, "content=") == 0) {
+            cur.content = unescapeNoteText(line.substr(8));
+            hasField = true;
+        }
+    }
+    if (inNote && hasField) m_notes.push_back(cur);
+    ifs.close();
+
+    if (sawNoteMarker && m_notes.empty()) {
+        std::string bak = std::string(NOTES_FILE) + ".bak";
+        std::remove(bak.c_str());
+        if (std::rename(NOTES_FILE, bak.c_str()) == 0) {
+            addMessage("⚠ 笔记文件内容异常，已原样备份为 " + bak + "（避免被新笔记覆盖）");
+        }
+    }
+}
+
 void Game::renderUI() {
     clearScreen();
 
     std::ostringstream ui;
 
-    title(*this, ui);
-
-    if (m_showMoonGod) {
-        renderMoonGodUI(*this, ui);
-    } else if (m_inMarket) {
-        renderMarketUI(*this, ui);
-    } else if (m_inWarehouse) {
-        renderWarehouseUI(*this, ui);
-    } else if (m_inHistory) {
-        renderHistoryUI(*this, ui);
-    } else if (m_inMainMenu) {
-        renderMainMenu(*this, ui);
+    if (m_inNotes && !m_showMoonGod) {
+        renderNotesUI(*this, ui);
     } else {
-        renderSceneUI(*this, ui);
-    }
+        title(*this, ui);
 
-    renderFooter(*this, ui);
+        if (m_showMoonGod) {
+            renderMoonGodUI(*this, ui);
+        } else if (m_inMarket) {
+            renderMarketUI(*this, ui);
+        } else if (m_inWarehouse) {
+            renderWarehouseUI(*this, ui);
+        } else if (m_inHistory) {
+            renderHistoryUI(*this, ui);
+        } else if (m_inMainMenu) {
+            renderMainMenu(*this, ui);
+        } else {
+            renderSceneUI(*this, ui);
+        }
+
+        renderFooter(*this, ui);
+    }
 
     std::cout << ui.str() << std::flush;
     scrollToEnd();
@@ -1791,78 +2593,79 @@ void Game::renderUI() {
 // LLLLLLLLLDDDDDDDDDDDDDDDDDDD 持久化
 
 void Game::saveToFile() {
-    std::ofstream ofs(SAVE_FILE);
-    if (!ofs) {
-        addMessage("❌ 无法保存配置文件！");
-        return;
-    }
+    std::ostringstream oss;
 
     auto now = std::chrono::system_clock::now();
     auto nowTime = std::chrono::system_clock::to_time_t(now);
 
-    ofs << "# FocusFarm 配置文件\n";
-    ofs << "# 保存时间: " << std::ctime(&nowTime);
-    ofs << "# 此文件包含所有游戏数据，可用于备份和迁移\n";
-    ofs << "# 手动编辑请谨慎，格式错误可能导致数据丢失\n";
-    ofs << "# LLLLLLLLLDDDDDDDDDDDDDDDDDDD\n\n";
+    oss << "# FocusFarm 配置文件\n";
+    oss << "# 保存时间: " << std::ctime(&nowTime);
+    oss << "# 此文件包含所有游戏数据，可用于备份和迁移\n";
+    oss << "# 手动编辑请谨慎，格式错误可能导致数据丢失\n";
+    oss << "# LLLLLLLLLDDDDDDDDDDDDDDDDDDD\n\n";
 
-    ofs << "[game]\n";
-    ofs << "currentSceneType=" << static_cast<int>(m_currentSceneType) << "\n";
-    ofs << "currentSceneIndex=" << m_currentSceneIndex << "\n";
-    ofs << "pestIntervalHours=" << m_pestIntervalHours << "\n";
-    ofs << "inMainMenu=" << (m_inMainMenu ? "1" : "0") << "\n";
-    ofs << "inMarket=" << (m_inMarket ? "1" : "0") << "\n";
-    ofs << "inWarehouse=" << (m_inWarehouse ? "1" : "0") << "\n";
-    ofs << "inHistory=" << (m_inHistory ? "1" : "0") << "\n\n";
+    oss << "[game]\n";
+    oss << "currentSceneType=" << static_cast<int>(m_currentSceneType) << "\n";
+    oss << "currentSceneIndex=" << m_currentSceneIndex << "\n";
+    oss << "pestIntervalHours=" << m_pestIntervalHours << "\n";
+    oss << "inMainMenu=" << (m_inMainMenu ? "1" : "0") << "\n";
+    oss << "inMarket=" << (m_inMarket ? "1" : "0") << "\n";
+    oss << "inWarehouse=" << (m_inWarehouse ? "1" : "0") << "\n";
+    oss << "inHistory=" << (m_inHistory ? "1" : "0") << "\n\n";
 
     // 番茄钟断点
-    ofs << "[timer]\n";
-    ofs << "state=" << static_cast<int>(m_timer.state()) << "\n";
-    ofs << "total=" << m_timer.totalSeconds() << "\n";
-    ofs << "remaining=" << m_timer.remainingSeconds() << "\n";
-    ofs << "focusSceneType=" << static_cast<int>(m_focusSceneType) << "\n";
-    ofs << "focusSceneIndex=" << m_focusSceneIndex << "\n";
-    ofs << "nightPaused=" << (m_nightPaused ? "1" : "0") << "\n\n";
+    oss << "[timer]\n";
+    oss << "state=" << static_cast<int>(m_timer.state()) << "\n";
+    oss << "total=" << m_timer.totalSeconds() << "\n";
+    oss << "remaining=" << m_timer.remainingSeconds() << "\n";
+    oss << "focusSceneType=" << static_cast<int>(m_focusSceneType) << "\n";
+    oss << "focusSceneIndex=" << m_focusSceneIndex << "\n";
+    oss << "nightPaused=" << (m_nightPaused ? "1" : "0") << "\n\n";
 
     // 仓库数据
-    ofs << "[warehouse]\n";
-    ofs << "wood=" << m_warehouse.wood() << "\n";
-    ofs << "fish=" << m_warehouse.fish() << "\n";
-    ofs << "meat=" << m_warehouse.meat() << "\n";
-    ofs << "crop=" << m_warehouse.crop() << "\n";
-    ofs << "moon=" << m_warehouse.moon() << "\n";
-    ofs << "herbicide=" << m_warehouse.herbicide() << "\n";
-    ofs << "pesticide=" << m_warehouse.pesticide() << "\n";
-    ofs << "snakeRepellent=" << m_warehouse.snakeRepellent() << "\n";
-    ofs << "cableTie=" << m_warehouse.cableTie() << "\n\n";
+    oss << "[warehouse]\n";
+    oss << "wood=" << m_warehouse.wood() << "\n";
+    oss << "fish=" << m_warehouse.fish() << "\n";
+    oss << "meat=" << m_warehouse.meat() << "\n";
+    oss << "crop=" << m_warehouse.crop() << "\n";
+    oss << "moon=" << m_warehouse.moon() << "\n";
+    oss << "herbicide=" << m_warehouse.herbicide() << "\n";
+    oss << "pesticide=" << m_warehouse.pesticide() << "\n";
+    oss << "snakeRepellent=" << m_warehouse.snakeRepellent() << "\n";
+    oss << "cableTie=" << m_warehouse.cableTie() << "\n\n";
 
     // 专注历史记录
-    ofs << "[focusHistory]\n";
+    oss << "[focusHistory]\n";
     for (const auto& entry : m_focusHistory) {
-        ofs << std::chrono::duration_cast<std::chrono::seconds>(
+        oss << std::chrono::duration_cast<std::chrono::seconds>(
             entry.time.time_since_epoch()).count() << "=" << entry.hours
             << "|" << entry.sceneName << "\n";
     }
-    ofs << "\n";
+    oss << "\n";
 
     // 荣誉系统
-    ofs << "[honor]\n";
-    ofs << "fullStreak=" << m_fullStreak << "\n";
-    ofs << "moonAwardDate=" << m_moonAwardDate << "\n";
-    ofs << "lastDateKey=" << m_lastDateKey << "\n";
-    ofs << "moonGodSummons=" << m_moonGodSummons << "\n\n";
+    oss << "[honor]\n";
+    oss << "fullStreak=" << m_fullStreak << "\n";
+    oss << "moonAwardDate=" << m_moonAwardDate << "\n";
+    oss << "lastDateKey=" << m_lastDateKey << "\n";
+    oss << "moonGodSummons=" << m_moonGodSummons << "\n\n";
 
-    ofs << "[dailyFocus]\n";
+    // 总天数倒计时
+    oss << "[countdown]\n";
+    oss << "name=" << escapeNoteText(m_countdownName) << "\n";
+    oss << "targetDate=" << m_countdownTargetDate << "\n\n";
+
+    oss << "[dailyFocus]\n";
     for (const auto& p : m_dailyFocus) {
-        ofs << p.first << "=" << p.second << "\n";
+        oss << p.first << "=" << p.second << "\n";
     }
-    ofs << "\n";
+    oss << "\n";
 
     // 场景数据
     auto saveScenes = [&](const std::string& prefix, const std::vector<Scene>& scenes) {
         for (size_t i = 0; i < scenes.size(); i++) {
-            ofs << "[" << prefix << ":" << i << "]\n";
-            ofs << scenes[i].serialize() << "\n";
+            oss << "[" << prefix << ":" << i << "]\n";
+            oss << scenes[i].serialize() << "\n";
         }
     };
 
@@ -1871,7 +2674,11 @@ void Game::saveToFile() {
     saveScenes("PASTURE", m_pastures);
     saveScenes("FIELD", m_fields);
 
-    ofs.close();
+    std::lock_guard<std::mutex> lk(g_saveMutex);
+    if (!writeFileAtomic(SAVE_FILE, oss.str())) {
+        addMessage("❌ 配置保存失败！请检查文件是否被占用或磁盘空间不足");
+        return;
+    }
     addMessage("💾 配置已保存到 " + std::string(SAVE_FILE));
 }
 
@@ -2050,6 +2857,27 @@ void Game::loadFromFile() {
         }
     }
 
+    {
+        auto it = sections.find("countdown");
+        if (it != sections.end()) {
+            const std::string& data = it->second;
+            auto getCdVal = [&](const std::string& key) -> std::string {
+                size_t pos = data.find(key + "=");
+                if (pos == std::string::npos) return "";
+                pos += key.length() + 1;
+                size_t end = data.find('\n', pos);
+                if (end == std::string::npos) end = data.length();
+                return data.substr(pos, end - pos);
+            };
+            m_countdownName = unescapeNoteText(getCdVal("name"));
+            m_countdownTargetDate = trimAscii(getCdVal("targetDate"));
+            if (!m_countdownTargetDate.empty() && !isValidDateFilter(m_countdownTargetDate)) {
+                m_countdownTargetDate.clear();
+                m_countdownName.clear();
+            }
+        }
+    }
+
     // 解析每日专注记录
     {
         auto it = sections.find("dailyFocus");
@@ -2149,11 +2977,26 @@ void Game::resetAll() {
     m_showMoonGod = false;
     m_moonGodAnimFrame = 0;
 
+    m_inNotes = false;
+    m_noteViewIdx = -1;
+    m_noteDeleteConfirm = false;
+    m_notePage = 0;
+    m_noteFilterDate.clear();
+    m_noteFilterTitle.clear();
+    m_noteTitleBuffer.clear();
+    m_noteContentBuffer.clear();
+    m_noteInputBuffer.clear();
+    m_countdownNameBuffer.clear();
+    m_countdownDaysBuffer.clear();
+    m_countdownPendingName.clear();
+
     // 重置时间戳
     m_lastPestCheck = std::chrono::steady_clock::now();
 
     // 删除存档文件
-    std::remove(SAVE_FILE);
-
-    addMessage("🔄 系统已重置为初始状态");
+    if (GetFileAttributesA(SAVE_FILE) == INVALID_FILE_ATTRIBUTES || std::remove(SAVE_FILE) == 0) {
+        addMessage("🔄 系统已重置为初始状态（笔记与倒计时未受影响）");
+    } else {
+        addMessage("⚠ 系统已重置，但存档文件未能删除，下次启动可能恢复旧数据");
+    }
 }

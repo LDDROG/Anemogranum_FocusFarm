@@ -28,6 +28,29 @@ void title(Game &game, std::ostringstream &ui)
     } 
     else
         ui << "⚠ 无法获取位置信息，请检查Windows定位设置\n";
+
+    if (game.hasCountdown()) {
+        int dl = game.countdownDaysLeft();
+        if (dl > 0) ui << "⏳ 距「" << game.countdownName() << "」还有 " << dl << " 天";
+        else if (dl == 0) ui << "⏳ 今天就是「" << game.countdownName() << "」";
+        else ui << "⏳ 「" << game.countdownName() << "」已过去 " << (-dl) << " 天";
+    } else {
+        ui << "⏳ 倒计时未设置（按 T 设置）";
+    }
+    ui << "     📝 笔记 " << game.noteCount() << " 条（按 N 打开）\n";
+
+    int im = game.inputMode();
+    if (im == 18 || im == 19) {
+        std::time_t nc = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+        std::tm* ti = std::localtime(&nc);
+        bool cursorOn = (ti && (ti->tm_sec % 2 == 0));
+        if (im == 18) {
+            ui << "   事件名称: " << game.countdownNameBuffer() << (cursorOn ? "▌" : " ") << "\n";
+        } else {
+            ui << "   距「" << game.countdownPendingName() << "」还有 "
+               << game.countdownDaysBuffer() << (cursorOn ? "▌" : " ") << "\n";
+        }
+    }
     ui << "\n";
 
     auto& t = game.timer();
@@ -43,7 +66,11 @@ void title(Game &game, std::ostringstream &ui)
         for (int i = 0; i < 20; i++) ui << (i < progress ? "█" : "░");
         ui << "]";
     }
-    ui << "\n\n";
+    ui << "\n";
+
+    int todayMins = (int)(game.todayFocusHours() * 60 + 0.5);
+    ui << "📅 今日专注 " << todayMins / 60 << " 小时 " << todayMins % 60 << " 分钟";
+    ui << "     🔥 连续满额 " << game.fullStreak() << "/5 天\n\n";
 }
 
 void renderMainMenu(Game& game, std::ostringstream& ui) 
@@ -329,13 +356,189 @@ void renderMoonGodUI(Game& game, std::ostringstream& ui)
     ui << "└────────────────────────────────────────────────────────────┘\n";
 }
 
+static std::string noteTimeText(std::chrono::system_clock::time_point tp)
+{
+    std::time_t t = std::chrono::system_clock::to_time_t(tp);
+    std::tm tmv;
+    localtime_s(&tmv, &t);
+    char buf[32];
+    std::snprintf(buf, sizeof(buf), "%04d-%02d-%02d %02d:%02d",
+                  tmv.tm_year + 1900, tmv.tm_mon + 1, tmv.tm_mday,
+                  tmv.tm_hour, tmv.tm_min);
+    return std::string(buf);
+}
+
+void renderNotesUI(Game& game, std::ostringstream& ui)
+{
+    int im = game.inputMode();
+
+    auto blink = []() -> std::string {
+        std::time_t nc = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+        std::tm* ti = std::localtime(&nc);
+        return (ti && (ti->tm_sec % 2 == 0)) ? "▌" : " ";
+    };
+
+    auto nowText = []() -> std::string {
+        std::time_t nc = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+        std::tm tmv;
+        localtime_s(&tmv, &nc);
+        char buf[32];
+        std::snprintf(buf, sizeof(buf), "%04d-%02d-%02d %02d:%02d",
+                      tmv.tm_year + 1900, tmv.tm_mon + 1, tmv.tm_mday,
+                      tmv.tm_hour, tmv.tm_min);
+        return std::string(buf);
+    };
+
+    const std::string sepLine = "────────────────────────────────────────────────────────────";
+
+    if (im == 10) {
+        ui << "🌞 天亮了！是否继续计时？\n\n";
+        ui << sepLine << "\n";
+        ui << "Y 继续计时     N 停止\n";
+        return;
+    }
+    if (im == 13) {
+        ui << nowText() << "\n\n";
+        ui << boldText(game.noteTitleBuffer() + blink()) << "\n\n";
+        ui << sepLine << "\n";
+        ui << "Enter 确认标题     Esc 取消\n";
+        return;
+    }
+    if (im == 14) {
+        ui << nowText() << "\n\n";
+        ui << boldText(game.noteTitleBuffer()) << "\n\n";
+        ui << game.noteContentBuffer() << blink() << "\n\n";
+        ui << sepLine << "\n";
+        ui << "Ctrl+S 保存     Enter 换行     Esc 取消\n";
+        return;
+    }
+    if (im == 15) {
+        ui << "按时间筛选\n\n";
+        ui << game.noteInputBuffer() << blink() << "\n\n";
+        ui << sepLine << "\n";
+        ui << "YYYY-MM-DD / YYYY-MM / YYYY，留空回车=清除     Esc 取消\n";
+        return;
+    }
+    if (im == 16) {
+        ui << "按标题搜索\n\n";
+        ui << game.noteInputBuffer() << blink() << "\n\n";
+        ui << sepLine << "\n";
+        ui << "留空回车=清除     Esc 取消\n";
+        return;
+    }
+    if (im == 17) {
+        ui << "删除笔记\n\n";
+        ui << "序号：" << game.noteInputBuffer() << blink() << "\n\n";
+        ui << sepLine << "\n";
+        ui << "Enter 删除     Esc 取消\n";
+        return;
+    }
+    if (im == 20) {
+        ui << "查看笔记\n\n";
+        ui << "序号：" << game.noteInputBuffer() << blink() << "\n\n";
+        ui << sepLine << "\n";
+        ui << "Enter 查看     Esc 取消\n";
+        return;
+    }
+    if (im == 18 || im == 19) {
+        ui << "设置倒计时\n\n";
+        if (im == 18) {
+            ui << "事件名称：" << game.countdownNameBuffer() << blink() << "\n\n";
+            ui << sepLine << "\n";
+            ui << "留空回车=清除倒计时     Esc 取消\n";
+        } else {
+            ui << "距「" << game.countdownPendingName() << "」还有 "
+               << game.countdownDaysBuffer() << blink() << "\n\n";
+            ui << sepLine << "\n";
+            ui << "输入天数或日期 YYYY-MM-DD     Enter 确认     Esc 取消\n";
+        }
+        return;
+    }
+
+    if (game.noteViewIdx() >= 0) {
+        const auto& notes = game.notes();
+        int idx = game.noteViewIdx();
+        if (idx < (int)notes.size()) {
+            const Note& n = notes[idx];
+            ui << noteTimeText(n.time) << "\n\n";
+            ui << boldText(n.title) << "\n\n";
+            ui << n.content << "\n\n";
+        }
+        ui << sepLine << "\n";
+        if (game.noteDeleteConfirm()) {
+            ui << "⚠ 确认删除这篇笔记？     Y 确认     其他键 取消\n";
+        } else {
+            ui << "D 删除这篇     其他任意键 返回列表\n";
+        }
+        return;
+    }
+
+    std::vector<int> idxs = game.filteredNoteIndices();
+    int total = (int)idxs.size();
+    int all = game.noteCount();
+
+    ui << "📝 我的笔记\n\n";
+    ui << "筛选: ";
+    if (game.noteFilterDate().empty() && game.noteFilterTitle().empty()) {
+        ui << "无";
+    } else {
+        ui << "时间「" << (game.noteFilterDate().empty() ? std::string("全部") : game.noteFilterDate())
+           << "」  标题「" << (game.noteFilterTitle().empty() ? std::string("全部") : game.noteFilterTitle())
+           << "」";
+    }
+    ui << "    共 " << total << " 条 / 全部 " << all << " 条\n\n";
+
+    if (all == 0) {
+        ui << "  还没有笔记\n";
+    } else if (total == 0) {
+        ui << "  没有符合条件的笔记\n";
+    } else {
+        const int PAGE = Game::NOTE_PAGE_SIZE;
+        int pages = (total + PAGE - 1) / PAGE;
+        if (pages < 1) pages = 1;
+        int page = game.notePage();
+        if (page >= pages) page = pages - 1;
+        if (page < 0) page = 0;
+
+        const auto& notes = game.notes();
+        int endIdx = (std::min)(total, (page + 1) * PAGE);
+        for (int i = page * PAGE; i < endIdx; i++) {
+            const Note& n = notes[idxs[i]];
+            std::string firstLine = n.content;
+            size_t nl = firstLine.find('\n');
+            if (nl != std::string::npos) firstLine = firstLine.substr(0, nl);
+            std::string preview = utf8Truncate(firstLine, 26);
+            bool cut = (preview.size() < firstLine.size());
+            int lineCount = 1;
+            for (size_t k = 0; k < n.content.size(); k++) {
+                if (n.content[k] == '\n') lineCount++;
+            }
+            ui << "  [" << (i + 1) << "] " << noteTimeText(n.time) << "  " << n.title << "\n";
+            ui << "        " << preview << (cut ? "…" : "");
+            if (lineCount > 1) ui << "（共 " << lineCount << " 行）";
+            ui << "\n";
+        }
+        ui << "\n── 第 " << (page + 1) << "/" << pages << " 页 ──\n";
+    }
+
+    ui << "\n" << sepLine << "\n";
+    auto& msgs = game.messages();
+    if (!msgs.empty()) ui << "> " << msgs.back() << "\n";
+    ui << "N 写新笔记   V 查看   D 删除   F 时间筛选   G 标题搜索   C 清除筛选\n";
+    ui << "T 倒计时     ↑↓ 翻页   B/Esc 返回   Q 退出\n";
+}
+
 void renderFooter(Game& game, std::ostringstream& ui) {
     ui << "\n── 操作 ──\n";
     int im = game.inputMode();
-    if (im == 10) {
+    if (im == 18) {
+        ui << "  [Enter]确认事件名（留空=清除倒计时）  [Esc]取消\n";
+    } else if (im == 19) {
+        ui << "  [Enter]确认天数或日期  [Esc]取消\n";
+    } else if (im == 10) {
         ui << "  [Y]继续计时  [N]停止\n";
     } else if (im == 1) {
-        ui << "  [A]10min [B]20min [C]30min [D]40min [E]1h [F]1.5h [G]2h\n";
+        ui << "  [A]10min [B]20min [C]30min [D]40min [E]1h [F]1.5h [G]2h [H]3.5h\n";
     } else if (im == 7) {
         ui << "  [A]5min [B]10min [C]15min [D]20min 或任意键跳过\n";
     } else if (im == 6) {
