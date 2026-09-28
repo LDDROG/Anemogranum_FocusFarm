@@ -90,23 +90,24 @@ Mac 版本以后再说···
 先编译资源（应用清单，决定控件是否启用系统视觉样式，不编译的话界面控件会退化成旧式直角外观）：
 
 ```bash
-windres -I src -i src/app.rc -o app_res.o
+mkdir -p build
+windres -I src -i src/app.rc -o build/app_res.o
 ```
 
-再编译主程序：
+再编译主程序（输出到 `build/`，避免和根目录的发布版混在一起）：
 
 ```bash
 g++ -std=c++17 -O2 -pthread \
-    -o FocusFarm.exe \
-    src/main.cpp src/game.cpp src/ui.cpp src/weather.cpp app_res.o -lgdi32
+    -o build/FocusFarm.exe \
+    src/main.cpp src/game.cpp src/ui.cpp src/weather.cpp build/app_res.o -lgdi32
 ```
 
-发布单文件静态版（不依赖 MinGW 运行时 DLL）：
+发布单文件静态版（不依赖 MinGW 运行时 DLL，输出在项目根目录便于打包）：
 
 ```bash
 g++ -std=c++17 -O2 -static -static-libgcc -static-libstdc++ -pthread \
     -o FocusFarm-v1.1.1.exe \
-    src/main.cpp src/game.cpp src/ui.cpp src/weather.cpp app_res.o -lgdi32
+    src/main.cpp src/game.cpp src/ui.cpp src/weather.cpp build/app_res.o -lgdi32
 ```
 
 ## 开源许可
