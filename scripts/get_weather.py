@@ -17,7 +17,7 @@ CITY_FILE = os.path.join(PROJECT_DIR, "focusfarm_weather_city.txt")
 
 def load_city():
     try:
-        with open(CITY_FILE, "r", encoding="utf-8") as f:
+        with open(CITY_FILE, "r", encoding="utf-8-sig") as f:
             return f.read().strip()
     except Exception:
         return ""

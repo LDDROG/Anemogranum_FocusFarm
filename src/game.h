@@ -285,7 +285,6 @@ public:
     int moonGodAnimTotal() const { return MOON_GOD_ANIM_TOTAL; }
     bool nightPaused() const { return m_nightPaused; }
 
-    bool inNotes() const { return m_inNotes; }
     int noteCount() const { return (int)m_notes.size(); }
     const std::vector<Note>& notes() const { return m_notes; }
     std::vector<int> filteredNoteIndices() const;
@@ -300,7 +299,6 @@ public:
     bool saveNotesToFile();
     void loadNotesFromFile();
 
-    const std::string& weatherCity() const { return m_weatherCity; }
     const std::string& weatherCityBuffer() const { return m_weatherCityBuffer; }
 
     bool hasCountdown() const { return !m_countdownTargetDate.empty(); }
@@ -321,6 +319,15 @@ private:
     void mainLoop();
     void readInput();
     void processInput();
+    bool handleArrowKey(const std::string& buf, size_t& i);
+    bool handleGlobalKey(unsigned char ch);
+    bool handleMainMenuKey(unsigned char ch);
+    bool handleMarketKey(unsigned char ch);
+    bool handleWarehouseKey(unsigned char ch);
+    bool handleHistoryKey(unsigned char ch);
+    bool handleNotesKey(unsigned char ch);
+    bool handleSceneKey(unsigned char ch);
+    bool handleInputModeKey(unsigned char ch);
     void updateGame();
     void renderUI();
 

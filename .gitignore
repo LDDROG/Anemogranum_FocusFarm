@@ -5,6 +5,7 @@ build/
 *.a
 *.zip
 .vscode
+__pycache__/
 focusfarm_save.dat
 focusfarm_notes.dat
 focusfarm_weather_city.txt

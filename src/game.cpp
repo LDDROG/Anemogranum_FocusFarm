@@ -29,6 +29,22 @@ static long long parseStoll(const std::string& val, const std::string& sec, cons
     try { return std::stoll(val); } catch (...) { throwParseError(sec, key, val); }
 }
 
+static std::string sectionKeyValue(const std::string& data, const std::string& key) {
+    size_t pos = data.find(key + "=");
+    if (pos == std::string::npos) return "";
+    pos += key.length() + 1;
+    size_t end = data.find('\n', pos);
+    if (end == std::string::npos) end = data.length();
+    return data.substr(pos, end - pos);
+}
+
+static std::string sectionValue(const std::map<std::string, std::string>& sections,
+                                const std::string& section, const std::string& key) {
+    auto it = sections.find(section);
+    if (it == sections.end()) return "";
+    return sectionKeyValue(it->second, key);
+}
+
 // LLLLLLLLLLDDDDDDDDDDDDDDDDDDD 终端工具
 
 void clearScreen()  // 清屏和光标复位
@@ -189,7 +205,8 @@ static std::string trimAscii(const std::string& s) {
     return s.substr(b, e - b);
 }
 
-static bool isValidDateFilter(const std::string& v) {
+// 笔记时间筛选用的宽松前缀：YYYY / YYYY-MM / YYYY-MM-DD 均合法
+static bool isDatePrefix(const std::string& v) {
     if (v.size() != 4 && v.size() != 7 && v.size() != 10) return false;
     for (size_t i = 0; i < v.size(); i++) {
         if (i == 4 || i == 7) {
@@ -199,6 +216,19 @@ static bool isValidDateFilter(const std::string& v) {
         }
     }
     return true;
+}
+
+// 倒计时目标日期用的严格日历日期：必须是 YYYY-MM-DD 且月/日在有效范围内
+static bool isCalendarDate(const std::string& v) {
+    if (v.size() != 10 || !isDatePrefix(v)) return false;
+    int y = 0, m = 0, d = 0;
+    if (std::sscanf(v.c_str(), "%d-%d-%d", &y, &m, &d) != 3) return false;
+    if (y < 1970 || y > 9999) return false;
+    if (m < 1 || m > 12) return false;
+    static const int dm[12] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+    bool leap = (y % 4 == 0 && y % 100 != 0) || (y % 400 == 0);
+    int dim = dm[m - 1] + ((m == 2 && leap) ? 1 : 0);
+    return d >= 1 && d <= dim;
 }
 
 static int parseSeqInput(const std::string& s) {
@@ -308,6 +338,15 @@ static bool writeFileAtomic(const std::string& path, const std::string& content)
     return true;
 }
 
+static const char UTF8_BOM_STR[] = "\xEF\xBB\xBF";
+
+static void stripUtf8Bom(std::string& s) {
+    if (s.size() >= 3 &&
+        (unsigned char)s[0] == 0xEF && (unsigned char)s[1] == 0xBB && (unsigned char)s[2] == 0xBF) {
+        s.erase(0, 3);
+    }
+}
+
 static std::string readTextFileTrimmed(const std::string& path) {
     std::ifstream ifs(path.c_str(), std::ios::binary);
     if (!ifs) return "";
@@ -315,10 +354,7 @@ static std::string readTextFileTrimmed(const std::string& path) {
     oss << ifs.rdbuf();
     ifs.close();
     std::string s = oss.str();
-    if (s.size() >= 3 &&
-        (unsigned char)s[0] == 0xEF && (unsigned char)s[1] == 0xBB && (unsigned char)s[2] == 0xBF) {
-        s.erase(0, 3);
-    }
+    stripUtf8Bom(s);
     return trimAscii(s);
 }
 
@@ -795,12 +831,7 @@ void Scene::deserialize(const std::string& id, const std::string& data)
 {
     // 场景索引格式定义
     auto getVal = [&](const std::string& key) -> std::string {
-        size_t pos = data.find(key + "=");
-        if (pos == std::string::npos) return "";
-        pos += key.length() + 1;
-        size_t end = data.find('\n', pos);
-        if (end == std::string::npos) end = data.length();
-        return data.substr(pos, end - pos);
+        return sectionKeyValue(data, key);
     };
 
     std::string nameVal = getVal("name");
@@ -1168,83 +1199,7 @@ void Game::processInput() {
     for (size_t i = 0; i < buf.size(); i++) {
         unsigned char ch = (unsigned char)buf[i];
 
-        if ((ch == 224 || ch == 0) && i + 1 < buf.size()) {
-            int code = (unsigned char)buf[i + 1];
-            i++;
-
-            if (m_inputMode > 0) continue;
-
-            if (m_inNotes) {
-                if (m_noteViewIdx >= 0) {
-                    if (code == 72 || code == 80 || code == 75 || code == 77) {
-                        m_noteViewIdx = -1;
-                        m_noteDeleteConfirm = false;
-                    }
-                } else {
-                    int total = (int)filteredNoteIndices().size();
-                    int pages = (total + NOTE_PAGE_SIZE - 1) / NOTE_PAGE_SIZE;
-                    if (pages < 1) pages = 1;
-                    if (code == 72) {
-                        if (m_notePage > 0) m_notePage--;
-                    } else if (code == 80) {
-                        if (m_notePage + 1 < pages) m_notePage++;
-                    }
-                }
-                continue;
-            }
-
-            if (m_inMainMenu) {
-                if (code == 75) { 
-                    int typeIdx = static_cast<int>(m_currentSceneType) - 1;
-                    if (typeIdx < 0) typeIdx = 3;
-                    m_currentSceneType = static_cast<SceneType>(typeIdx);
-                    m_currentSceneIndex = 0;
-                } else if (code == 77) {
-                    int typeIdx = static_cast<int>(m_currentSceneType) + 1;
-                    if (typeIdx > 3) typeIdx = 0;
-                    m_currentSceneType = static_cast<SceneType>(typeIdx);
-                    m_currentSceneIndex = 0;
-                } else if (code == 72) {
-                    int count = getSceneCount(*this, m_currentSceneType);
-                    if (count > 0) {
-                        m_currentSceneIndex--;
-                        if (m_currentSceneIndex < 0) m_currentSceneIndex = count - 1;
-                    }
-                } else if (code == 80) {
-                    int count = getSceneCount(*this, m_currentSceneType);
-                    if (count > 0) {
-                        m_currentSceneIndex++;
-                        if (m_currentSceneIndex >= count) m_currentSceneIndex = 0;
-                    }
-                }
-                continue;
-            }
-
-            if (!m_inMarket && !m_inWarehouse && !m_inHistory && !m_inMainMenu && !m_inNotes) {
-                SceneType type = m_currentSceneType;
-                int count = getSceneCount(*this, type);
-                if (code == 72) {
-                    m_currentSceneIndex--;
-                    if (m_currentSceneIndex < 0) m_currentSceneIndex = count - 1;
-                } else if (code == 80) { 
-                    m_currentSceneIndex++;
-                    if (m_currentSceneIndex >= count) m_currentSceneIndex = 0;
-                } else if (code == 75) { 
-                    int typeIdx = static_cast<int>(type);
-                    typeIdx--;
-                    if (typeIdx < 0) typeIdx = 3;
-                    m_currentSceneType = static_cast<SceneType>(typeIdx);
-                    m_currentSceneIndex = 0;
-                } else if (code == 77) { 
-                    int typeIdx = static_cast<int>(type);
-                    typeIdx++;
-                    if (typeIdx > 3) typeIdx = 0;
-                    m_currentSceneType = static_cast<SceneType>(typeIdx);
-                    m_currentSceneIndex = 0;
-                }
-            }
-            continue;
-        }
+        if (handleArrowKey(buf, i)) continue;
 
         if ((ch == 'q' || ch == 'Q') && m_inputMode != 6 && m_inputMode != 11 && m_inputMode < 13) {
             saveToFile();
@@ -1252,982 +1207,1087 @@ void Game::processInput() {
             return;
         }
 
-        if (m_inputMode == 0 && !m_inNotes) {
-            if (ch == 'n' || ch == 'N') {
-                m_inNotes = true;
+        if (handleGlobalKey(ch)) continue;
+        if (handleMainMenuKey(ch)) continue;
+        if (handleMarketKey(ch)) continue;
+        if (handleWarehouseKey(ch)) continue;
+        if (handleHistoryKey(ch)) continue;
+        if (handleNotesKey(ch)) continue;
+        if (handleSceneKey(ch)) continue;
+        if (handleInputModeKey(ch)) continue;
+    }
+}
+
+bool Game::handleArrowKey(const std::string& buf, size_t& i) {
+    unsigned char ch = (unsigned char)buf[i];
+    if (!((ch == 224 || ch == 0) && i + 1 < buf.size())) return false;
+    int code = (unsigned char)buf[i + 1];
+    i++;
+
+    if (m_inputMode > 0) return true;
+
+    if (m_inNotes) {
+        if (m_noteViewIdx >= 0) {
+            if (code == 72 || code == 80 || code == 75 || code == 77) {
                 m_noteViewIdx = -1;
                 m_noteDeleteConfirm = false;
+            }
+        } else {
+            int total = (int)filteredNoteIndices().size();
+            int pages = (total + NOTE_PAGE_SIZE - 1) / NOTE_PAGE_SIZE;
+            if (pages < 1) pages = 1;
+            if (code == 72) {
+                if (m_notePage > 0) m_notePage--;
+            } else if (code == 80) {
+                if (m_notePage + 1 < pages) m_notePage++;
+            }
+        }
+        return true;
+    }
+
+    if (m_inMainMenu) {
+        if (code == 75) { 
+            int typeIdx = static_cast<int>(m_currentSceneType) - 1;
+            if (typeIdx < 0) typeIdx = 3;
+            m_currentSceneType = static_cast<SceneType>(typeIdx);
+            m_currentSceneIndex = 0;
+        } else if (code == 77) {
+            int typeIdx = static_cast<int>(m_currentSceneType) + 1;
+            if (typeIdx > 3) typeIdx = 0;
+            m_currentSceneType = static_cast<SceneType>(typeIdx);
+            m_currentSceneIndex = 0;
+        } else if (code == 72) {
+            int count = getSceneCount(*this, m_currentSceneType);
+            if (count > 0) {
+                m_currentSceneIndex--;
+                if (m_currentSceneIndex < 0) m_currentSceneIndex = count - 1;
+            }
+        } else if (code == 80) {
+            int count = getSceneCount(*this, m_currentSceneType);
+            if (count > 0) {
+                m_currentSceneIndex++;
+                if (m_currentSceneIndex >= count) m_currentSceneIndex = 0;
+            }
+        }
+        return true;
+    }
+
+    if (!m_inMarket && !m_inWarehouse && !m_inHistory && !m_inMainMenu && !m_inNotes) {
+        SceneType type = m_currentSceneType;
+        int count = getSceneCount(*this, type);
+        if (code == 72) {
+            m_currentSceneIndex--;
+            if (m_currentSceneIndex < 0) m_currentSceneIndex = count - 1;
+        } else if (code == 80) { 
+            m_currentSceneIndex++;
+            if (m_currentSceneIndex >= count) m_currentSceneIndex = 0;
+        } else if (code == 75) { 
+            int typeIdx = static_cast<int>(type);
+            typeIdx--;
+            if (typeIdx < 0) typeIdx = 3;
+            m_currentSceneType = static_cast<SceneType>(typeIdx);
+            m_currentSceneIndex = 0;
+        } else if (code == 77) { 
+            int typeIdx = static_cast<int>(type);
+            typeIdx++;
+            if (typeIdx > 3) typeIdx = 0;
+            m_currentSceneType = static_cast<SceneType>(typeIdx);
+            m_currentSceneIndex = 0;
+        }
+    }
+    return true;
+}
+
+bool Game::handleGlobalKey(unsigned char ch) {
+    if (m_inputMode != 0 || m_inNotes) return false;
+    if (ch == 'n' || ch == 'N') {
+        m_inNotes = true;
+        m_noteViewIdx = -1;
+        m_noteDeleteConfirm = false;
+        m_notePage = 0;
+        m_noteInputBuffer.clear();
+        m_uiDirty = true;
+        return true;
+    }
+    if (ch == 't' || ch == 'T') {
+        m_countdownNameBuffer.clear();
+        m_countdownDaysBuffer.clear();
+        m_countdownPendingName.clear();
+        addMessage("⏳ 设置倒计时：请输入事件名称（留空回车=清除倒计时）");
+        m_inputMode = 18;
+        return true;
+    }
+    if (ch == 'p' || ch == 'P') {
+        m_weatherCityBuffer = m_weatherCity;
+        addMessage("📍 请输入城市名称（支持模糊搜索，如：广州 / 天河区 / 浦东新区；留空回车=恢复自动定位）");
+        m_inputMode = 21;
+        return true;
+    }
+    return false;
+}
+
+bool Game::handleMainMenuKey(unsigned char ch) {
+    if (!m_inMainMenu || m_inputMode != 0 || m_inNotes) return false;
+    switch (ch) {
+        case '\r': case '\n': case ' ': 
+        {
+            m_inMainMenu = false;
+            addMessage("\xf0\x9f\x94\x8d \xe8\xbf\x9b\xe5\x85\xa5\xe5\x9c\xba\xe6\x99\xaf"); // 🔍 进入场景
+            break;
+        }
+        case 'm': case 'M':
+            m_inMarket = true;
+            m_inWarehouse = false;
+            m_inHistory = false;
+            m_inMainMenu = false;
+            break;
+        case 'w': case 'W':
+            m_inWarehouse = true;
+            m_inMarket = false;
+            m_inHistory = false;
+            m_inMainMenu = false;
+            break;
+        case 'h': case 'H':
+            m_inHistory = true;
+            m_inMarket = false;
+            m_inWarehouse = false;
+            m_inMainMenu = false;
+            break;
+        case 's': case 'S':
+            cyclePestInterval();
+            addMessage("\xe2\x9a\x99 \xe6\x9d\x82\xe8\x8d\x89\xe7\x94\x9f\xe6\x88\x90\xe9\x80\x9f\xe5\xba\xa6\xe5\xb7\xb2\xe8\xae\xbe\xe4\xb8\xba: " + pestIntervalLabel());
+            break;
+        case 'a': case 'A':
+            addMessage("✏ 请输入新子场景名称，按 Enter 确认:");
+            m_renameBuffer.clear();
+            m_inputMode = 11;
+            return true;
+        case 'd': case 'D': {
+            std::vector<Scene>* scenes = scenesOf(m_currentSceneType);
+            if (!scenes || scenes->empty()) {
+                addMessage("❌ 没有可删除的子场景");
+                break;
+            }
+            if ((int)scenes->size() <= 1) {
+                addMessage("❌ 每个场景至少保留一个子场景");
+                break;
+            }
+            addMessage("⚠ 确认删除「" + (*scenes)[m_currentSceneIndex].name() + "」？[Y]确认 [其他键]取消");
+            m_inputMode = 12;
+            return true;
+        }
+        case 'x': case 'X':
+            addMessage("⚠ 确认重置整个系统？游戏进度将全部丢失（笔记与倒计时保留）[Y]确认 [其他键]取消");
+            m_inputMode = 9;
+            return true;
+        case '1': case '2': case '3': case '4': {
+            int idx = ch - '1';
+            if (idx < 4) {
+                m_currentSceneType = static_cast<SceneType>(idx);
+                m_currentSceneIndex = 0;
+            }
+            break;
+        }
+    }
+    return true;
+}
+
+bool Game::handleMarketKey(unsigned char ch) {
+    if (!m_inMarket || m_inputMode != 0 || m_inNotes) return false;
+    switch (ch) {
+        case 'b': case 'B':
+            m_inMarket = false;
+            m_inMainMenu = true;
+            break;
+        case '1':
+            if (m_warehouse.consumeWood(3)) {
+                m_warehouse.addHerbicide();
+                addMessage("\xf0\x9f\x9b\x92 \xe7\x94\xa8 3\xf0\x9f\xaa\xb5 \xe6\x8d\xa2\xe5\x8f\x96\xe4\xba\x86 1\xf0\x9f\xa7\xaa \xe9\x99\xa4\xe8\x8d\x89\xe5\x89\x82");
+            } else addMessage("\xe2\x9d\x8c \xe6\x9c\xa8\xe5\xa4\xb4\xe4\xb8\x8d\xe8\xb6\xb3\xef\xbc\x81\xe9\x9c\x80\xe8\xa6\x81 3\xf0\x9f\xaa\xb5");
+            break;
+        case '2':
+            if (m_warehouse.consumeCrop(3)) {
+                m_warehouse.addPesticide();
+                addMessage("\xf0\x9f\x9b\x92 \xe7\x94\xa8 3\xf0\x9f\x8c\xbd \xe6\x8d\xa2\xe5\x8f\x96\xe4\xba\x86 1\xf0\x9f\x92\x8a \xe5\x86\x9c\xe8\x8d\xaf");
+            } else addMessage("\xe2\x9d\x8c \xe4\xbd\x9c\xe7\x89\xa9\xe4\xb8\x8d\xe8\xb6\xb3\xef\xbc\x81\xe9\x9c\x80\xe8\xa6\x81 3\xf0\x9f\x8c\xbd");
+            break;
+        case '3':
+            if (m_warehouse.consumeMeat(3)) {
+                m_warehouse.addSnakeRepellent();
+                addMessage("\xf0\x9f\x9b\x92 \xe7\x94\xa8 3\xf0\x9f\xa5\xa9 \xe6\x8d\xa2\xe5\x8f\x96\xe4\xba\x86 1\xf0\x9f\xaa\xa4 \xe9\xa9\xb1\xe8\x9b\x87\xe5\x89\x82");
+            } else addMessage("\xe2\x9d\x8c \xe8\x82\x89\xe4\xb8\x8d\xe8\xb6\xb3\xef\xbc\x81\xe9\x9c\x80\xe8\xa6\x81 3\xf0\x9f\xa5\xa9");
+            break;
+        case '4':
+            if (m_warehouse.consumeFish(3)) {
+                m_warehouse.addCableTie();
+                addMessage("\xf0\x9f\x9b\x92 \xe7\x94\xa8 3\xf0\x9f\x90\x9f \xe6\x8d\xa2\xe5\x8f\x96\xe4\xba\x86 1\xf0\x9f\x94\x97 \xe8\xbd\xa7\xe5\xb8\xa6");
+            } else addMessage("\xe2\x9d\x8c \xe9\xb1\xbc\xe4\xb8\x8d\xe8\xb6\xb3\xef\xbc\x81\xe9\x9c\x80\xe8\xa6\x81 3\xf0\x9f\x90\x9f");
+            break;
+    }
+    return true;
+}
+
+bool Game::handleWarehouseKey(unsigned char ch) {
+    if (!m_inWarehouse || m_inputMode != 0 || m_inNotes) return false;
+    switch (ch) {
+        case 'b': case 'B':
+            m_inWarehouse = false;
+            m_inMainMenu = true;
+            break;
+        case '1': {
+            bool hasPest = false;
+            for (auto& f : m_forests) { if (f.pestCount() > 0) { hasPest = true; break; } }
+            if (!hasPest) {
+                addMessage("❌ 所有森林都没有杂草，无需使用");
+            } else if (m_warehouse.useHerbicide()) {
+                for (auto& f : m_forests) {
+                    if (f.pestCount() > 0) {
+                        f.removePest();
+                        addMessage("\xf0\x9f\xa7\xaa \xe4\xbd\xbf\xe7\x94\xa8\xe9\x99\xa4\xe8\x8d\x89\xe5\x89\x82\xe6\xb8\x85\xe9\x99\xa4\xe4\xba\x86\xe4\xb8\x80\xe4\xb8\xaa\xf0\x9f\x8c\xbf");
+                        break;
+                    }
+                }
+            } else addMessage("\xe2\x9d\x8c \xe6\xb2\xa1\xe6\x9c\x89\xe9\x99\xa4\xe8\x8d\x89\xe5\x89\x82\xef\xbc\x81");
+            break;
+        }
+        case '2': {
+            bool hasPest = false;
+            for (auto& f : m_fields) { if (f.pestCount() > 0) { hasPest = true; break; } }
+            if (!hasPest) {
+                addMessage("❌ 所有稻田都没有虫子，无需使用");
+            } else if (m_warehouse.usePesticide()) {
+                for (auto& f : m_fields) {
+                    if (f.pestCount() > 0) {
+                        f.removePest();
+                        addMessage("\xf0\x9f\x92\x8a \xe4\xbd\xbf\xe7\x94\xa8\xe5\x86\x9c\xe8\x8d\xaf\xe6\xb8\x85\xe9\x99\xa4\xe4\xba\x86\xe4\xb8\x80\xe4\xb8\xaa\xf0\x9f\x90\x9b");
+                        break;
+                    }
+                }
+            } else addMessage("\xe2\x9d\x8c \xe6\xb2\xa1\xe6\x9c\x89\xe5\x86\x9c\xe8\x8d\xaf\xef\xbc\x81");
+            break;
+        }
+        case '3': {
+            bool hasPest = false;
+            for (auto& p : m_pastures) { if (p.pestCount() > 0) { hasPest = true; break; } }
+            if (!hasPest) {
+                addMessage("❌ 所有牧场都没有蛇，无需使用");
+            } else if (m_warehouse.useSnakeRepellent()) {
+                for (auto& p : m_pastures) {
+                    if (p.pestCount() > 0) {
+                        p.removePest();
+                        addMessage("\xf0\x9f\xaa\xa4 \xe4\xbd\xbf\xe7\x94\xa8\xe9\xa9\xb1\xe8\x9b\x87\xe5\x89\x82\xe6\xb8\x85\xe9\x99\xa4\xe4\xba\x86\xe4\xb8\x80\xe4\xb8\xaa\xf0\x9f\x90\x8d");
+                        break;
+                    }
+                }
+            } else addMessage("\xe2\x9d\x8c \xe6\xb2\xa1\xe6\x9c\x89\xe9\xa9\xb1\xe8\x9b\x87\xe5\x89\x82\xef\xbc\x81");
+            break;
+        }
+        case '4': {
+            bool hasPest = false;
+            for (auto& p : m_ponds) { if (p.pestCount() > 0) { hasPest = true; break; } }
+            if (!hasPest) {
+                addMessage("❌ 所有鱼塘都没有珊瑚，无需使用");
+            } else if (m_warehouse.useCableTie()) {
+                for (auto& p : m_ponds) {
+                    if (p.pestCount() > 0) {
+                        p.removePest();
+                        addMessage("\xf0\x9f\x94\x97 \xe4\xbd\xbf\xe7\x94\xa8\xe8\xbd\xa7\xe5\xb8\xa6\xe6\xb8\x85\xe9\x99\xa4\xe4\xba\x86\xe4\xb8\x80\xe4\xb8\xaa\xf0\x9f\xaa\xb8");
+                        break;
+                    }
+                }
+            } else addMessage("\xe2\x9d\x8c \xe6\xb2\xa1\xe6\x9c\x89\xe8\xbd\xa7\xe5\xb8\xa6\xef\xbc\x81");
+            break;
+        }
+    }
+    return true;
+}
+
+bool Game::handleHistoryKey(unsigned char ch) {
+    if (!m_inHistory || m_inputMode != 0 || m_inNotes) return false;
+    switch (ch) {
+        case 'b': case 'B':
+            m_inHistory = false;
+            m_inMainMenu = true;
+            break;
+    }
+    return true;
+}
+
+bool Game::handleNotesKey(unsigned char ch) {
+    if (!m_inNotes) return false;
+    if (m_inputMode != 0 && (m_inputMode < 13 || m_inputMode > 20)) return false;
+    switch (m_inputMode) {
+        case 13: {
+            if (ch == 27) {
+                m_noteTitleBuffer.clear();
+                m_noteContentBuffer.clear();
+                m_inputMode = 0;
+                addMessage("❌ 已取消新建笔记");
+            } else if (ch == '\r' || ch == '\n') {
+                if (m_noteTitleBuffer.empty()) {
+                    m_noteTitleBuffer = formatTimePoint(std::chrono::system_clock::now()) + " 的笔记";
+                }
+                m_noteContentBuffer.clear();
+                m_inputMode = 14;
+                addMessage("📝 请输入正文（Enter 换行，Tab 保存，Esc 取消）");
+            } else if (ch == '\b' || ch == 127) {
+                popUtf8Char(m_noteTitleBuffer);
+            } else if (ch >= 32) {
+                m_noteTitleBuffer += (char)ch;
+            }
+            break;
+        }
+        case 14: {
+            if (ch == '\t') {
+                if (m_noteContentBuffer.empty()) {
+                    addMessage("❌ 正文为空，无法保存（Esc 取消）");
+                    break;
+                }
+                Note n;
+                n.time = std::chrono::system_clock::now();
+                n.title = m_noteTitleBuffer;
+                n.content = m_noteContentBuffer;
+                while (!n.content.empty() &&
+                       (n.content.back() == '\n' || n.content.back() == '\r')) {
+                    n.content.pop_back();
+                }
+                m_notes.push_back(n);
+                bool saved = saveNotesToFile();
+                m_noteTitleBuffer.clear();
+                m_noteContentBuffer.clear();
+                m_inputMode = 0;
                 m_notePage = 0;
+                if (saved) addMessage("📝 笔记已保存：" + n.title);
+                else addMessage("⚠ 笔记仅存在于本次运行中，写入文件失败！");
+            } else if (ch == 27) {
+                m_noteTitleBuffer.clear();
+                m_noteContentBuffer.clear();
+                m_inputMode = 0;
+                addMessage("❌ 已取消新建笔记");
+            } else if (ch == '\r' || ch == '\n') {
+                m_noteContentBuffer += '\n';
+            } else if (ch == '\b' || ch == 127) {
+                popUtf8Char(m_noteContentBuffer);
+            } else if (ch >= 32) {
+                m_noteContentBuffer += (char)ch;
+            }
+            break;
+        }
+        case 15: {
+            if (ch == 27) {
                 m_noteInputBuffer.clear();
-                m_uiDirty = true;
-                continue;
+                m_inputMode = 0;
+                addMessage("❌ 已取消时间筛选");
+            } else if (ch == '\r' || ch == '\n') {
+                std::string v = trimAscii(m_noteInputBuffer);
+                if (v.empty()) {
+                    m_noteFilterDate.clear();
+                    addMessage("🔎 已清除时间筛选");
+                } else if (isDatePrefix(v)) {
+                    m_noteFilterDate = v;
+                    addMessage("🔎 时间筛选：" + v);
+                } else {
+                    addMessage("❌ 日期格式无效，请用 YYYY-MM-DD / YYYY-MM / YYYY");
+                }
+                m_noteInputBuffer.clear();
+                m_inputMode = 0;
+                m_notePage = 0;
+            } else if (ch == '\b' || ch == 127) {
+                popUtf8Char(m_noteInputBuffer);
+            } else if (ch >= 32) {
+                m_noteInputBuffer += (char)ch;
             }
-            if (ch == 't' || ch == 'T') {
-                m_countdownNameBuffer.clear();
-                m_countdownDaysBuffer.clear();
-                m_countdownPendingName.clear();
-                addMessage("⏳ 设置倒计时：请输入事件名称（留空回车=清除倒计时）");
-                m_inputMode = 18;
-                continue;
-            }
-            if (ch == 'p' || ch == 'P') {
-                m_weatherCityBuffer = m_weatherCity;
-                addMessage("📍 请输入城市名称（支持模糊搜索，如：广州 / 天河区 / 浦东新区；留空回车=恢复自动定位）");
-                m_inputMode = 21;
-                continue;
-            }
+            break;
         }
-
-        if (m_inMainMenu && m_inputMode == 0 && !m_inNotes) {
-            switch (ch) {
-                case '\r': case '\n': case ' ': 
-                {
-                    m_inMainMenu = false;
-                    addMessage("\xf0\x9f\x94\x8d \xe8\xbf\x9b\xe5\x85\xa5\xe5\x9c\xba\xe6\x99\xaf"); // 🔍 进入场景
-                    break;
+        case 16: {
+            if (ch == 27) {
+                m_noteInputBuffer.clear();
+                m_inputMode = 0;
+                addMessage("❌ 已取消标题搜索");
+            } else if (ch == '\r' || ch == '\n') {
+                std::string v = trimAscii(m_noteInputBuffer);
+                if (v.empty()) {
+                    m_noteFilterTitle.clear();
+                    addMessage("🔎 已清除标题搜索");
+                } else {
+                    m_noteFilterTitle = v;
+                    addMessage("🔎 标题搜索：" + v);
                 }
-                case 'm': case 'M':
-                    m_inMarket = true;
-                    m_inWarehouse = false;
-                    m_inHistory = false;
-                    m_inMainMenu = false;
-                    break;
-                case 'w': case 'W':
-                    m_inWarehouse = true;
-                    m_inMarket = false;
-                    m_inHistory = false;
-                    m_inMainMenu = false;
-                    break;
-                case 'h': case 'H':
-                    m_inHistory = true;
-                    m_inMarket = false;
-                    m_inWarehouse = false;
-                    m_inMainMenu = false;
-                    break;
-                case 's': case 'S':
-                    cyclePestInterval();
-                    addMessage("\xe2\x9a\x99 \xe6\x9d\x82\xe8\x8d\x89\xe7\x94\x9f\xe6\x88\x90\xe9\x80\x9f\xe5\xba\xa6\xe5\xb7\xb2\xe8\xae\xbe\xe4\xb8\xba: " + pestIntervalLabel());
-                    break;
-                case 'a': case 'A':
-                    addMessage("✏ 请输入新子场景名称，按 Enter 确认:");
-                    m_renameBuffer.clear();
-                    m_inputMode = 11;
-                    continue;
-                case 'd': case 'D': {
-                    std::vector<Scene>* scenes = scenesOf(m_currentSceneType);
-                    if (!scenes || scenes->empty()) {
-                        addMessage("❌ 没有可删除的子场景");
-                        break;
-                    }
-                    if ((int)scenes->size() <= 1) {
-                        addMessage("❌ 每个场景至少保留一个子场景");
-                        break;
-                    }
-                    addMessage("⚠ 确认删除「" + (*scenes)[m_currentSceneIndex].name() + "」？[Y]确认 [其他键]取消");
-                    m_inputMode = 12;
-                    continue;
-                }
-                case 'x': case 'X':
-                    addMessage("⚠ 确认重置整个系统？游戏进度将全部丢失（笔记与倒计时保留）[Y]确认 [其他键]取消");
-                    m_inputMode = 9;
-                    continue;
-                case '1': case '2': case '3': case '4': {
-                    int idx = ch - '1';
-                    if (idx < 4) {
-                        m_currentSceneType = static_cast<SceneType>(idx);
-                        m_currentSceneIndex = 0;
-                    }
-                    break;
-                }
+                m_noteInputBuffer.clear();
+                m_inputMode = 0;
+                m_notePage = 0;
+            } else if (ch == '\b' || ch == 127) {
+                popUtf8Char(m_noteInputBuffer);
+            } else if (ch >= 32) {
+                m_noteInputBuffer += (char)ch;
             }
-            continue;
+            break;
         }
-
-        // 集市模式
-        if (m_inMarket && m_inputMode == 0 && !m_inNotes) {
-            switch (ch) {
-                case 'b': case 'B':
-                    m_inMarket = false;
-                    m_inMainMenu = true;
-                    break;
-                case '1':
-                    if (m_warehouse.consumeWood(3)) {
-                        m_warehouse.addHerbicide();
-                        addMessage("\xf0\x9f\x9b\x92 \xe7\x94\xa8 3\xf0\x9f\xaa\xb5 \xe6\x8d\xa2\xe5\x8f\x96\xe4\xba\x86 1\xf0\x9f\xa7\xaa \xe9\x99\xa4\xe8\x8d\x89\xe5\x89\x82");
-                    } else addMessage("\xe2\x9d\x8c \xe6\x9c\xa8\xe5\xa4\xb4\xe4\xb8\x8d\xe8\xb6\xb3\xef\xbc\x81\xe9\x9c\x80\xe8\xa6\x81 3\xf0\x9f\xaa\xb5");
-                    break;
-                case '2':
-                    if (m_warehouse.consumeCrop(3)) {
-                        m_warehouse.addPesticide();
-                        addMessage("\xf0\x9f\x9b\x92 \xe7\x94\xa8 3\xf0\x9f\x8c\xbd \xe6\x8d\xa2\xe5\x8f\x96\xe4\xba\x86 1\xf0\x9f\x92\x8a \xe5\x86\x9c\xe8\x8d\xaf");
-                    } else addMessage("\xe2\x9d\x8c \xe4\xbd\x9c\xe7\x89\xa9\xe4\xb8\x8d\xe8\xb6\xb3\xef\xbc\x81\xe9\x9c\x80\xe8\xa6\x81 3\xf0\x9f\x8c\xbd");
-                    break;
-                case '3':
-                    if (m_warehouse.consumeMeat(3)) {
-                        m_warehouse.addSnakeRepellent();
-                        addMessage("\xf0\x9f\x9b\x92 \xe7\x94\xa8 3\xf0\x9f\xa5\xa9 \xe6\x8d\xa2\xe5\x8f\x96\xe4\xba\x86 1\xf0\x9f\xaa\xa4 \xe9\xa9\xb1\xe8\x9b\x87\xe5\x89\x82");
-                    } else addMessage("\xe2\x9d\x8c \xe8\x82\x89\xe4\xb8\x8d\xe8\xb6\xb3\xef\xbc\x81\xe9\x9c\x80\xe8\xa6\x81 3\xf0\x9f\xa5\xa9");
-                    break;
-                case '4':
-                    if (m_warehouse.consumeFish(3)) {
-                        m_warehouse.addCableTie();
-                        addMessage("\xf0\x9f\x9b\x92 \xe7\x94\xa8 3\xf0\x9f\x90\x9f \xe6\x8d\xa2\xe5\x8f\x96\xe4\xba\x86 1\xf0\x9f\x94\x97 \xe8\xbd\xa7\xe5\xb8\xa6");
-                    } else addMessage("\xe2\x9d\x8c \xe9\xb1\xbc\xe4\xb8\x8d\xe8\xb6\xb3\xef\xbc\x81\xe9\x9c\x80\xe8\xa6\x81 3\xf0\x9f\x90\x9f");
-                    break;
+        case 17: {
+            if (ch == 27) {
+                m_noteInputBuffer.clear();
+                m_inputMode = 0;
+                addMessage("❌ 已取消删除");
+            } else if (ch == '\r' || ch == '\n') {
+                int seq = parseSeqInput(m_noteInputBuffer);
+                std::vector<int> idxs = filteredNoteIndices();
+                if (seq >= 1 && seq <= (int)idxs.size()) {
+                    int real = idxs[seq - 1];
+                    std::string nm = m_notes[real].title;
+                    m_notes.erase(m_notes.begin() + real);
+                    bool saved = saveNotesToFile();
+                    addMessage("🗑 已删除笔记：" + nm);
+                    if (!saved) addMessage("⚠ 删除结果写入文件失败，重启后该笔记可能仍在");
+                    m_noteViewIdx = -1;
+                } else {
+                    addMessage("❌ 序号无效");
+                }
+                m_noteInputBuffer.clear();
+                m_inputMode = 0;
+                m_notePage = 0;
+            } else if (ch == '\b' || ch == 127) {
+                if (!m_noteInputBuffer.empty()) m_noteInputBuffer.pop_back();
+            } else if (ch >= '0' && ch <= '9') {
+                m_noteInputBuffer += (char)ch;
             }
-            continue;
+            break;
         }
-
-        // 仓库模式
-        if (m_inWarehouse && m_inputMode == 0 && !m_inNotes) {
-            switch (ch) {
-                case 'b': case 'B':
-                    m_inWarehouse = false;
-                    m_inMainMenu = true;
-                    break;
-                case '1': {
-                    bool hasPest = false;
-                    for (auto& f : m_forests) { if (f.pestCount() > 0) { hasPest = true; break; } }
-                    if (!hasPest) {
-                        addMessage("❌ 所有森林都没有杂草，无需使用");
-                    } else if (m_warehouse.useHerbicide()) {
-                        for (auto& f : m_forests) {
-                            if (f.pestCount() > 0) {
-                                f.removePest();
-                                addMessage("\xf0\x9f\xa7\xaa \xe4\xbd\xbf\xe7\x94\xa8\xe9\x99\xa4\xe8\x8d\x89\xe5\x89\x82\xe6\xb8\x85\xe9\x99\xa4\xe4\xba\x86\xe4\xb8\x80\xe4\xb8\xaa\xf0\x9f\x8c\xbf");
-                                break;
-                            }
-                        }
-                    } else addMessage("\xe2\x9d\x8c \xe6\xb2\xa1\xe6\x9c\x89\xe9\x99\xa4\xe8\x8d\x89\xe5\x89\x82\xef\xbc\x81");
-                    break;
+        case 20: {
+            if (ch == 27) {
+                m_noteInputBuffer.clear();
+                m_inputMode = 0;
+                addMessage("❌ 已取消查看");
+            } else if (ch == '\r' || ch == '\n') {
+                int seq = parseSeqInput(m_noteInputBuffer);
+                std::vector<int> idxs = filteredNoteIndices();
+                if (seq >= 1 && seq <= (int)idxs.size()) {
+                    m_noteViewIdx = idxs[seq - 1];
+                } else {
+                    addMessage("❌ 序号无效");
                 }
-                case '2': {
-                    bool hasPest = false;
-                    for (auto& f : m_fields) { if (f.pestCount() > 0) { hasPest = true; break; } }
-                    if (!hasPest) {
-                        addMessage("❌ 所有稻田都没有虫子，无需使用");
-                    } else if (m_warehouse.usePesticide()) {
-                        for (auto& f : m_fields) {
-                            if (f.pestCount() > 0) {
-                                f.removePest();
-                                addMessage("\xf0\x9f\x92\x8a \xe4\xbd\xbf\xe7\x94\xa8\xe5\x86\x9c\xe8\x8d\xaf\xe6\xb8\x85\xe9\x99\xa4\xe4\xba\x86\xe4\xb8\x80\xe4\xb8\xaa\xf0\x9f\x90\x9b");
-                                break;
-                            }
-                        }
-                    } else addMessage("\xe2\x9d\x8c \xe6\xb2\xa1\xe6\x9c\x89\xe5\x86\x9c\xe8\x8d\xaf\xef\xbc\x81");
-                    break;
-                }
-                case '3': {
-                    bool hasPest = false;
-                    for (auto& p : m_pastures) { if (p.pestCount() > 0) { hasPest = true; break; } }
-                    if (!hasPest) {
-                        addMessage("❌ 所有牧场都没有蛇，无需使用");
-                    } else if (m_warehouse.useSnakeRepellent()) {
-                        for (auto& p : m_pastures) {
-                            if (p.pestCount() > 0) {
-                                p.removePest();
-                                addMessage("\xf0\x9f\xaa\xa4 \xe4\xbd\xbf\xe7\x94\xa8\xe9\xa9\xb1\xe8\x9b\x87\xe5\x89\x82\xe6\xb8\x85\xe9\x99\xa4\xe4\xba\x86\xe4\xb8\x80\xe4\xb8\xaa\xf0\x9f\x90\x8d");
-                                break;
-                            }
-                        }
-                    } else addMessage("\xe2\x9d\x8c \xe6\xb2\xa1\xe6\x9c\x89\xe9\xa9\xb1\xe8\x9b\x87\xe5\x89\x82\xef\xbc\x81");
-                    break;
-                }
-                case '4': {
-                    bool hasPest = false;
-                    for (auto& p : m_ponds) { if (p.pestCount() > 0) { hasPest = true; break; } }
-                    if (!hasPest) {
-                        addMessage("❌ 所有鱼塘都没有珊瑚，无需使用");
-                    } else if (m_warehouse.useCableTie()) {
-                        for (auto& p : m_ponds) {
-                            if (p.pestCount() > 0) {
-                                p.removePest();
-                                addMessage("\xf0\x9f\x94\x97 \xe4\xbd\xbf\xe7\x94\xa8\xe8\xbd\xa7\xe5\xb8\xa6\xe6\xb8\x85\xe9\x99\xa4\xe4\xba\x86\xe4\xb8\x80\xe4\xb8\xaa\xf0\x9f\xaa\xb8");
-                                break;
-                            }
-                        }
-                    } else addMessage("\xe2\x9d\x8c \xe6\xb2\xa1\xe6\x9c\x89\xe8\xbd\xa7\xe5\xb8\xa6\xef\xbc\x81");
-                    break;
-                }
+                m_noteInputBuffer.clear();
+                m_inputMode = 0;
+            } else if (ch == '\b' || ch == 127) {
+                if (!m_noteInputBuffer.empty()) m_noteInputBuffer.pop_back();
+            } else if (ch >= '0' && ch <= '9') {
+                m_noteInputBuffer += (char)ch;
             }
-            continue;
+            break;
         }
-
-        if (m_inHistory && m_inputMode == 0 && !m_inNotes) {
-            switch (ch) {
-                case 'b': case 'B':
-                    m_inHistory = false;
-                    m_inMainMenu = true;
-                    break;
-            }
-            continue;
-        }
-
-        if (m_inNotes && (m_inputMode == 0 || (m_inputMode >= 13 && m_inputMode <= 20))) {
-            switch (m_inputMode) {
-                case 13: {
-                    if (ch == 27) {
-                        m_noteTitleBuffer.clear();
-                        m_noteContentBuffer.clear();
-                        m_inputMode = 0;
-                        addMessage("❌ 已取消新建笔记");
-                    } else if (ch == '\r' || ch == '\n') {
-                        if (m_noteTitleBuffer.empty()) {
-                            m_noteTitleBuffer = formatTimePoint(std::chrono::system_clock::now()) + " 的笔记";
-                        }
-                        m_noteContentBuffer.clear();
-                        m_inputMode = 14;
-                        addMessage("📝 请输入正文（Enter 换行，Tab 保存，Esc 取消）");
-                    } else if (ch == '\b' || ch == 127) {
-                        popUtf8Char(m_noteTitleBuffer);
-                    } else if (ch >= 32) {
-                        m_noteTitleBuffer += (char)ch;
-                    }
-                    break;
-                }
-                case 14: {
-                    if (ch == '\t') {
-                        if (m_noteContentBuffer.empty()) {
-                            addMessage("❌ 正文为空，无法保存（Esc 取消）");
-                            break;
-                        }
-                        Note n;
-                        n.time = std::chrono::system_clock::now();
-                        n.title = m_noteTitleBuffer;
-                        n.content = m_noteContentBuffer;
-                        while (!n.content.empty() &&
-                               (n.content.back() == '\n' || n.content.back() == '\r')) {
-                            n.content.pop_back();
-                        }
-                        m_notes.push_back(n);
-                        bool saved = saveNotesToFile();
-                        m_noteTitleBuffer.clear();
-                        m_noteContentBuffer.clear();
-                        m_inputMode = 0;
-                        m_notePage = 0;
-                        if (saved) addMessage("📝 笔记已保存：" + n.title);
-                        else addMessage("⚠ 笔记仅存在于本次运行中，写入文件失败！");
-                    } else if (ch == 27) {
-                        m_noteTitleBuffer.clear();
-                        m_noteContentBuffer.clear();
-                        m_inputMode = 0;
-                        addMessage("❌ 已取消新建笔记");
-                    } else if (ch == '\r' || ch == '\n') {
-                        m_noteContentBuffer += '\n';
-                    } else if (ch == '\b' || ch == 127) {
-                        popUtf8Char(m_noteContentBuffer);
-                    } else if (ch >= 32) {
-                        m_noteContentBuffer += (char)ch;
-                    }
-                    break;
-                }
-                case 15: {
-                    if (ch == 27) {
-                        m_noteInputBuffer.clear();
-                        m_inputMode = 0;
-                        addMessage("❌ 已取消时间筛选");
-                    } else if (ch == '\r' || ch == '\n') {
-                        std::string v = trimAscii(m_noteInputBuffer);
-                        if (v.empty()) {
-                            m_noteFilterDate.clear();
-                            addMessage("🔎 已清除时间筛选");
-                        } else if (isValidDateFilter(v)) {
-                            m_noteFilterDate = v;
-                            addMessage("🔎 时间筛选：" + v);
-                        } else {
-                            addMessage("❌ 日期格式无效，请用 YYYY-MM-DD / YYYY-MM / YYYY");
-                        }
-                        m_noteInputBuffer.clear();
-                        m_inputMode = 0;
-                        m_notePage = 0;
-                    } else if (ch == '\b' || ch == 127) {
-                        popUtf8Char(m_noteInputBuffer);
-                    } else if (ch >= 32) {
-                        m_noteInputBuffer += (char)ch;
-                    }
-                    break;
-                }
-                case 16: {
-                    if (ch == 27) {
-                        m_noteInputBuffer.clear();
-                        m_inputMode = 0;
-                        addMessage("❌ 已取消标题搜索");
-                    } else if (ch == '\r' || ch == '\n') {
-                        std::string v = trimAscii(m_noteInputBuffer);
-                        if (v.empty()) {
-                            m_noteFilterTitle.clear();
-                            addMessage("🔎 已清除标题搜索");
-                        } else {
-                            m_noteFilterTitle = v;
-                            addMessage("🔎 标题搜索：" + v);
-                        }
-                        m_noteInputBuffer.clear();
-                        m_inputMode = 0;
-                        m_notePage = 0;
-                    } else if (ch == '\b' || ch == 127) {
-                        popUtf8Char(m_noteInputBuffer);
-                    } else if (ch >= 32) {
-                        m_noteInputBuffer += (char)ch;
-                    }
-                    break;
-                }
-                case 17: {
-                    if (ch == 27) {
-                        m_noteInputBuffer.clear();
-                        m_inputMode = 0;
-                        addMessage("❌ 已取消删除");
-                    } else if (ch == '\r' || ch == '\n') {
-                        int seq = parseSeqInput(m_noteInputBuffer);
-                        std::vector<int> idxs = filteredNoteIndices();
-                        if (seq >= 1 && seq <= (int)idxs.size()) {
-                            int real = idxs[seq - 1];
-                            std::string nm = m_notes[real].title;
-                            m_notes.erase(m_notes.begin() + real);
+        default: {
+            if (m_noteViewIdx >= 0) {
+                if (m_noteDeleteConfirm) {
+                    if (ch == 'y' || ch == 'Y') {
+                        if (m_noteViewIdx < (int)m_notes.size()) {
+                            std::string nm = m_notes[m_noteViewIdx].title;
+                            m_notes.erase(m_notes.begin() + m_noteViewIdx);
                             bool saved = saveNotesToFile();
                             addMessage("🗑 已删除笔记：" + nm);
                             if (!saved) addMessage("⚠ 删除结果写入文件失败，重启后该笔记可能仍在");
-                            m_noteViewIdx = -1;
-                        } else {
-                            addMessage("❌ 序号无效");
                         }
-                        m_noteInputBuffer.clear();
-                        m_inputMode = 0;
+                        m_noteViewIdx = -1;
                         m_notePage = 0;
-                    } else if (ch == '\b' || ch == 127) {
-                        if (!m_noteInputBuffer.empty()) m_noteInputBuffer.pop_back();
-                    } else if (ch >= '0' && ch <= '9') {
-                        m_noteInputBuffer += (char)ch;
-                    }
-                    break;
-                }
-                case 20: {
-                    if (ch == 27) {
-                        m_noteInputBuffer.clear();
-                        m_inputMode = 0;
-                        addMessage("❌ 已取消查看");
-                    } else if (ch == '\r' || ch == '\n') {
-                        int seq = parseSeqInput(m_noteInputBuffer);
-                        std::vector<int> idxs = filteredNoteIndices();
-                        if (seq >= 1 && seq <= (int)idxs.size()) {
-                            m_noteViewIdx = idxs[seq - 1];
-                        } else {
-                            addMessage("❌ 序号无效");
-                        }
-                        m_noteInputBuffer.clear();
-                        m_inputMode = 0;
-                    } else if (ch == '\b' || ch == 127) {
-                        if (!m_noteInputBuffer.empty()) m_noteInputBuffer.pop_back();
-                    } else if (ch >= '0' && ch <= '9') {
-                        m_noteInputBuffer += (char)ch;
-                    }
-                    break;
-                }
-                default: {
-                    if (m_noteViewIdx >= 0) {
-                        if (m_noteDeleteConfirm) {
-                            if (ch == 'y' || ch == 'Y') {
-                                if (m_noteViewIdx < (int)m_notes.size()) {
-                                    std::string nm = m_notes[m_noteViewIdx].title;
-                                    m_notes.erase(m_notes.begin() + m_noteViewIdx);
-                                    bool saved = saveNotesToFile();
-                                    addMessage("🗑 已删除笔记：" + nm);
-                                    if (!saved) addMessage("⚠ 删除结果写入文件失败，重启后该笔记可能仍在");
-                                }
-                                m_noteViewIdx = -1;
-                                m_notePage = 0;
-                            } else {
-                                addMessage("❌ 已取消删除");
-                            }
-                            m_noteDeleteConfirm = false;
-                        } else if (ch == 'd' || ch == 'D') {
-                            m_noteDeleteConfirm = true;
-                        } else {
-                            m_noteViewIdx = -1;
-                        }
-                        break;
-                    }
-                    switch (ch) {
-                        case 'n': case 'N':
-                            m_noteTitleBuffer.clear();
-                            m_noteContentBuffer.clear();
-                            addMessage("📝 请输入笔记标题（留空回车=用当前时间作标题）");
-                            m_inputMode = 13;
-                            break;
-                        case 'v': case 'V':
-                            if (m_notes.empty()) {
-                                addMessage("❌ 还没有笔记");
-                                break;
-                            }
-                            m_noteInputBuffer.clear();
-                            addMessage("📖 输入要查看的笔记序号，回车确认");
-                            m_inputMode = 20;
-                            break;
-                        case 'd': case 'D':
-                            if (m_notes.empty()) {
-                                addMessage("❌ 还没有笔记");
-                                break;
-                            }
-                            m_noteInputBuffer.clear();
-                            addMessage("🗑 输入要删除的笔记序号，回车确认");
-                            m_inputMode = 17;
-                            break;
-                        case 'f': case 'F':
-                            m_noteInputBuffer.clear();
-                            addMessage("🔎 输入日期筛选（YYYY-MM-DD / YYYY-MM / YYYY，留空回车=清除）");
-                            m_inputMode = 15;
-                            break;
-                        case 'g': case 'G':
-                            m_noteInputBuffer.clear();
-                            addMessage("🔎 输入标题关键词（留空回车=清除）");
-                            m_inputMode = 16;
-                            break;
-                        case 'c': case 'C':
-                            m_noteFilterDate.clear();
-                            m_noteFilterTitle.clear();
-                            m_notePage = 0;
-                            addMessage("🔎 已清除全部筛选");
-                            break;
-                        case 't': case 'T':
-                            m_countdownNameBuffer.clear();
-                            m_countdownDaysBuffer.clear();
-                            m_countdownPendingName.clear();
-                            addMessage("⏳ 设置倒计时：请输入事件名称（留空回车=清除倒计时）");
-                            m_inputMode = 18;
-                            break;
-                        case 27:
-                        case 'b': case 'B':
-                            m_inNotes = false;
-                            m_noteViewIdx = -1;
-                            m_noteDeleteConfirm = false;
-                            break;
-                        default:
-                            break;
-                    }
-                    break;
-                }
-            }
-            continue;
-        }
-
-        // 场景内操作（输入模式下不处理命令）
-        Scene* sc = currentScene();
-        if (m_inputMode == 0) {
-            if (!sc) continue;
-            switch (ch) {
-            case 'b': case 'B':
-                m_inMainMenu = true;
-                break;
-            case 'm': case 'M':
-                m_inMarket = true;
-                break;
-            case 'w': case 'W':
-                m_inWarehouse = true;
-                break;
-            case '1': {
-                if (isNightTime()) {
-                    addMessage("🌙 夜深了，去睡个觉吧···");
-                    break;
-                }
-                if (m_timer.state() == PomodoroTimer::State::RESTING) {
-                    m_timer.stop();
-                    addMessage("\xe2\x8f\xb9 \xe5\xb7\xb2\xe5\x81\x9c\xe6\xad\xa2\xe4\xbc\x91\xe6\x81\xaf");
-                }
-                if (m_timer.state() == PomodoroTimer::State::FOCUSING) {
-                    addMessage("\xe2\x9d\x8c \xe7\x95\xaa\xe8\x8c\x84\xe9\x92\x9f\xe5\xb7\xb2\xe5\x9c\xa8\xe8\xbf\x90\xe8\xa1\x8c\xe4\xb8\xad");
-                    break;
-                }
-                if (!sc->currentObject()) {
-                    addMessage("❌ 请先种植一个物体，再开始专注");
-                    break;
-                }
-                if (sc->currentObject() && sc->currentObject()->isMature()) {
-                    addMessage("\xe2\x9d\x8c \xe5\xbd\x93\xe5\x89\x8d\xe7\x89\xa9\xe4\xbd\x93\xe5\xb7\xb2\xe6\x88\x90\xe7\x86\x9f\xef\xbc\x8c\xe8\xaf\xb7\xe5\x85\x88\xe7\xa7\x8d\xe6\xa4\x8d\xe6\x96\xb0\xe7\x89\xa9\xe4\xbd\x93");
-                    break;
-                }
-                // 15h/24h 限制检查
-                double f24 = focusInLast24h();
-                if (f24 >= 15.0) {
-                    addMessage("\xe2\x9d\x8c 24\xe5\xb0\x8f\xe6\x97\xb6\xe5\x86\x85\xe5\xb7\xb2\xe4\xb8\x93\xe6\xb3\xa8 " +
-                        std::to_string(static_cast<int>(f24 * 60)) + " 分钟，已达到上限15小时，请休息后再来");
-                    break;
-                }
-                // 预设专注时长：10, 20, 30, 40, 60, 90, 120分钟
-                addMessage("\xe2\x8f\xb1 \xe8\xaf\xb7\xe9\x80\x89\xe6\x8b\xa9\xe4\xb8\x93\xe6\xb3\xa8\xe6\x97\xb6\xe9\x95\xbf: [A]10min [B]20min [C]30min [D]40min [E]1h [F]1.5h [G]2h [H]3.5h");
-                m_inputMode = 1;
-                break;
-            }
-            case '2': {
-                // 停止专注或休息
-                if (m_timer.state() == PomodoroTimer::State::IDLE) {
-                    addMessage("\xe2\x9d\x8c \xe6\xb2\xa1\xe6\x9c\x89\xe5\x9c\xa8\xe8\xbf\x9b\xe8\xa1\x8c\xe7\x9a\x84\xe8\xae\xa1\xe6\x97\xb6");
-                    break;
-                }
-                Scene* focusSc = getScene(m_focusSceneType, m_focusSceneIndex);
-                if (!focusSc) focusSc = sc;
-                int elapsed = m_timer.elapsedSeconds();
-                double hours = elapsed / 3600.0;
-                if (hours > 0 && m_timer.state() == PomodoroTimer::State::FOCUSING) {
-                    focusSc->addFocusHours(hours);
-                    addFocusRecord(hours, focusSc->name());
-                    recordFocus(hours);
-                    collectMature(focusSc);
-                    addMessage("\xe2\x8f\xb9 \xe6\x89\x8b\xe5\x8a\xa8\xe5\x81\x9c\xe6\xad\xa2\xe4\xb8\x93\xe6\xb3\xa8\xef\xbc\x8c\xe5\xb7\xb2\xe7\xb4\xaf\xe7\xa7\xaf " +
-                        std::to_string(static_cast<int>(hours * 60)) + " \xe5\x88\x86\xe9\x92\x9f");
-                    if (hours >= Scene::MIN_FOCUS_FOR_PEST_RESET) {
-                        addMessage("\xf0\x9f\x8c\xbf " + focusSc->name() + " \xe6\x9d\x82\xe8\x8d\x89\xe8\xae\xa1\xe6\x97\xb6\xe5\x99\xa8\xe5\xb7\xb2\xe9\x87\x8d\xe7\xbd\xae");
-                    } else {
-                        addMessage("⚠ 专注不足20分钟，杂草计时器未重置");
-                    }
-                    addMessage("😴 要休息一下吗？ [A]5min [B]10min [C]15min [D]20min 或任意键跳过");
-                    m_inputMode = 7;
-                } else if (m_timer.state() == PomodoroTimer::State::RESTING) {
-                    addMessage("\xe2\x8f\xb9 \xe6\x89\x8b\xe5\x8a\xa8\xe5\x81\x9c\xe6\xad\xa2\xe4\xbc\x91\xe6\x81\xaf");
-                }
-                m_timer.stop();
-                break;
-            }
-            case '0': {
-                if (m_timer.state() == PomodoroTimer::State::FOCUSING) {
-                    Scene* focusSc = getScene(m_focusSceneType, m_focusSceneIndex);
-                    if (!focusSc) focusSc = sc;
-                    int elapsed = m_timer.elapsedSeconds();
-                    double hours = elapsed / 3600.0;
-                    if (hours > 0 && focusSc) {
-                        focusSc->addFocusHours(hours);
-                        addFocusRecord(hours, focusSc->name());
-                        recordFocus(hours);
-                        collectMature(focusSc);
-                        addMessage("\xe2\x8f\xb9 \xe5\xb7\xb2\xe5\x81\x9c\xe6\xad\xa2\xe4\xb8\x93\xe6\xb3\xa8\xef\xbc\x8c\xe5\xb7\xb2\xe7\xb4\xaf\xe7\xa7\xaf " +
-                            std::to_string(static_cast<int>(hours * 60)) + " \xe5\x88\x86\xe9\x92\x9f");
-                        if (hours >= Scene::MIN_FOCUS_FOR_PEST_RESET) {
-                            addMessage("\xf0\x9f\x8c\xbf " + focusSc->name() + " \xe6\x9d\x82\xe8\x8d\x89\xe8\xae\xa1\xe6\x97\xb6\xe5\x99\xa8\xe5\xb7\xb2\xe9\x87\x8d\xe7\xbd\xae");
-                        } else {
-                            addMessage("⚠ 专注不足20分钟，杂草计时器未重置");
-                        }
-                    }
-                    m_timer.stop();
-                }
-                if (m_timer.state() == PomodoroTimer::State::RESTING) {
-                    addMessage("\xe2\x9d\x8c \xe5\xb7\xb2\xe5\x9c\xa8\xe4\xbc\x91\xe6\x81\xaf\xe4\xb8\xad");
-                    break;
-                }
-                addMessage("\xf0\x9f\x98\xb4 \xe8\xaf\xb7\xe9\x80\x89\xe6\x8b\xa9\xe4\xbc\x91\xe6\x81\xaf\xe6\x97\xb6\xe9\x95\xbf: [A]5min [B]10min [C]15min [D]20min \xe6\x88\x96\xe4\xbb\xbb\xe6\x84\x8f\xe9\x94\xae\xe8\xb7\xb3\xe8\xbf\x87");
-                m_inputMode = 7;
-                continue;
-            }
-            case '3': {
-                // 种新作物
-                if (!sc->canPlant()) {
-                    addMessage("\xe2\x9d\x8c \xe5\xbd\x93\xe5\x89\x8d\xe7\x89\xa9\xe4\xbd\x93\xe8\xbf\x98\xe6\x9c\xaa\xe5\xae\x8c\xe5\x85\xa8\xe9\x95\xbf\xe5\xa4\xa7\xef\xbc\x81");
-                    break;
-                }
-                switch (sc->type()) {
-                    case SceneType::FOREST:
-                        addMessage("\xf0\x9f\x8c\xb1 \xe9\x80\x89\xe6\x8b\xa9\xe6\xa0\x91\xe7\xa7\x8d: [A]\xf0\x9f\x8c\xb2\xe6\x9d\xbe [B]\xf0\x9f\x8c\xb3\xe8\x90\xbd\xe5\x8f\xb6 [C]\xf0\x9f\x8c\xb4\xe6\xa3\x95\xe6\xa6\x88");
-                        m_inputMode = 2;
-                        break;
-                    case SceneType::POND:
-                        addMessage("\xf0\x9f\x90\x9f \xe9\x80\x89\xe6\x8b\xa9\xe9\xb1\xbc\xe7\xa7\x8d: [A]\xf0\x9f\x90\x9f\xe6\x99\xae\xe9\x80\x9a [B]\xf0\x9f\x90\xa0\xe7\x83\xad\xe5\xb8\xa6 [C]\xf0\x9f\x90\xa1\xe6\xb2\xb3\xe8\xb1\x9a");
-                        m_inputMode = 3;
-                        break;
-                    case SceneType::PASTURE:
-                        addMessage("\xf0\x9f\x90\x84 \xe9\x80\x89\xe6\x8b\xa9\xe7\x89\xb2\xe7\x95\x9c: [A]\xf0\x9f\x90\x84\xe7\x89\x9b [B]\xf0\x9f\x90\x91\xe7\xbe\x8a [C]\xf0\x9f\x90\x96\xe7\x8c\xaa [D]\xf0\x9f\x90\x93\xe9\xb8\xa1");
-                        m_inputMode = 4;
-                        break;
-                    case SceneType::FIELD:
-                        addMessage("\xf0\x9f\x8c\xbe \xe9\x80\x89\xe6\x8b\xa9\xe4\xbd\x9c\xe7\x89\xa9: [A]\xf0\x9f\x8c\xbe\xe5\xb0\x8f\xe9\xba\xa6 [B]\xf0\x9f\x8c\xbd\xe7\x8e\x89\xe7\xb1\xb3 [C]\xf0\x9f\xa5\x95\xe8\x83\xa1\xe8\x90\x9d\xe5\x8d\x9c [D]\xf0\x9f\x8d\x85\xe8\xa5\xbf\xe7\xba\xa2\xe6\x9f\xbf [E]\xf0\x9f\x8d\x93\xe8\x8d\x89\xe8\x8e\x93 [F]\xf0\x9f\x8d\x86\xe8\x8c\x84\xe5\xad\x90 [G]\xf0\x9f\xa5\x92\xe9\xbb\x84\xe7\x93\x9c");
-                        m_inputMode = 5;
-                        break;
-                    default: break;
-                }
-                break;
-            }
-            case '4': {
-                // 清除有害物品
-                if (sc->pestCount() > 0) {
-                    sc->removePest();
-                    addMessage("🧹 清除了一个" + sc->pestEmoji());
-                } else {
-                    addMessage("❌ 没有有害物品！");
-                }
-                break;
-            }
-            case 'l': case 'L': {
-                // 封锁/解锁
-                sc->setLocked(!sc->locked());
-                addMessage(sc->locked() ? "\xf0\x9f\x94\x92 \xe5\xb7\xb2\xe5\xb0\x81\xe9\x94\x81 " + sc->name()
-                                        : "\xf0\x9f\x94\x93 \xe5\xb7\xb2\xe8\xa7\xa3\xe9\x94\x81 " + sc->name());
-                break;
-            }
-            case 'r': case 'R': {
-                // 重命名场景
-                addMessage("✏ 请输入新名称，按 Enter 确认:");
-                m_renameBuffer.clear();
-                m_inputMode = 6;
-                break;
-            }
-            case 'd': case 'D': {
-                // 铲除当前物体
-                if (sc->objects().empty()) {
-                    addMessage("❌ 当前场景没有物体可铲除！");
-                    break;
-                }
-                addMessage("⚠ 确认铲除 " + sc->name() + " 的最后一个物体？[Y]确认 [其他键]取消");
-                m_inputMode = 8;
-                continue;
-            }
-            case 'x': case 'X': {
-                // 系统重置
-                addMessage("⚠ 确认重置整个系统？游戏进度将全部丢失（笔记与倒计时保留）[Y]确认 [其他键]取消");
-                m_inputMode = 9;
-                continue;
-            }
-            }
-            /* 场景命令若已开启输入模式（专注时长/种植类型/休息/重命名/确认），
-               必须立即结束本轮：否则触发键会被下方的输入模式当成选项或字符消费掉
-               例如按1会被case1的default把inputMode重置为0，导致专注永远无法开始 */
-            if (m_inputMode > 0) continue;
-        }
-
-        // 输入模式处理
-        if (m_inputMode > 0) {
-            switch (m_inputMode) {
-                case 1: { // 专注时长选择
-                    int minutes = 0;
-                    switch (ch) {
-                        case 'a': case 'A': minutes = 10; break;
-                        case 'b': case 'B': minutes = 20; break;
-                        case 'c': case 'C': minutes = 30; break;
-                        case 'd': case 'D': minutes = 40; break;
-                        case 'e': case 'E': minutes = 60; break;
-                        case 'f': case 'F': minutes = 90; break;
-                        case 'g': case 'G': minutes = 120; break;
-                        case 'h': case 'H': minutes = 210; break;
-                        default: m_inputMode = 0; break;
-                    }
-                    if (minutes > 0) {
-                        m_timer.startFocus(minutes);
-                        m_lastFocusMinutes = minutes;
-                        m_focusSceneType = m_currentSceneType;
-                        m_focusSceneIndex = m_currentSceneIndex;
-                        m_nightPaused = false;
-                        m_resumePrompted = false;
-                        addMessage("\xe2\x96\xb6 \xe5\xbc\x80\xe5\xa7\x8b\xe4\xb8\x93\xe6\xb3\xa8 " +
-                            std::to_string(minutes) + " \xe5\x88\x86\xe9\x92\x9f");
-                        m_inputMode = 0;
-                    }
-                    break;
-                }
-                case 2: { // 森林树木类型
-                    int typeIdx = -1;
-                    switch (ch) {
-                        case 'a': case 'A': typeIdx = 0; break; // 松树
-                        case 'b': case 'B': typeIdx = 1; break; // 落叶树
-                        case 'c': case 'C': typeIdx = 2; break; // 棕榈树
-                        default: m_inputMode = 0; break;
-                    }
-                    if (typeIdx >= 0 && sc) {
-                        sc->plant(typeIdx);
-                        addMessage("\xf0\x9f\x8c\xb1 \xe5\x9c\xa8 " + sc->name() + " \xe7\xa7\x8d\xe4\xb8\x8b\xe4\xba\x86\xe4\xb8\x80\xe6\xa3\xb5\xe6\xa0\x91");
-                        m_inputMode = 0;
-                    }
-                    break;
-                }
-                case 3: { // 鱼塘鱼类型
-                    int typeIdx = -1;
-                    switch (ch) {
-                        case 'a': case 'A': typeIdx = 0; break;
-                        case 'b': case 'B': typeIdx = 1; break;
-                        case 'c': case 'C': typeIdx = 2; break;
-                        default: m_inputMode = 0; break;
-                    }
-                    if (typeIdx >= 0 && sc) {
-                        sc->plant(typeIdx);
-                        addMessage("\xf0\x9f\x90\x9f \xe5\x9c\xa8 " + sc->name() + " \xe6\x94\xbe\xe5\x85\xa5\xe4\xba\x86\xe4\xb8\x80\xe6\x9d\xa1\xe9\xb1\xbc");
-                        m_inputMode = 0;
-                    }
-                    break;
-                }
-                case 4: { // 牧场动物类型
-                    int typeIdx = -1;
-                    switch (ch) {
-                        case 'a': case 'A': typeIdx = 0; break;
-                        case 'b': case 'B': typeIdx = 1; break;
-                        case 'c': case 'C': typeIdx = 2; break;
-                        case 'd': case 'D': typeIdx = 3; break;
-                        default: m_inputMode = 0; break;
-                    }
-                    if (typeIdx >= 0 && sc) {
-                        sc->plant(typeIdx);
-                        addMessage("\xf0\x9f\x90\x84 \xe5\x9c\xa8 " + sc->name() + " \xe5\xbc\x80\xe5\xa7\x8b\xe5\x85\xbb\xe6\xae\x96\xe4\xba\x86\xe4\xb8\x80\xe5\x8f\xaa\xe5\x8a\xa8\xe7\x89\xa9");
-                        m_inputMode = 0;
-                    }
-                    break;
-                }
-                case 5: { // 稻田作物类型
-                    int typeIdx = -1;
-                    switch (ch) {
-                        case 'a': case 'A': typeIdx = 0; break;
-                        case 'b': case 'B': typeIdx = 1; break;
-                        case 'c': case 'C': typeIdx = 2; break;
-                        case 'd': case 'D': typeIdx = 3; break;
-                        case 'e': case 'E': typeIdx = 4; break;
-                        case 'f': case 'F': typeIdx = 5; break;
-                        case 'g': case 'G': typeIdx = 6; break;
-                        default: m_inputMode = 0; break;
-                    }
-                    if (typeIdx >= 0 && sc) {
-                        sc->plant(typeIdx);
-                        addMessage("\xf0\x9f\x8c\xbe \xe5\x9c\xa8 " + sc->name() + " \xe6\x92\xad\xe7\xa7\x8d\xe4\xba\x86\xe4\xb8\x80\xe6\xa3\xb5\xe4\xbd\x9c\xe7\x89\xa9");
-                        m_inputMode = 0;
-                    }
-                    break;
-                }
-                case 6: { // 重命名场景
-                    if (ch == '\r' || ch == '\n') {
-                        if (!m_renameBuffer.empty() && sc) {
-                            std::string oldName = sc->name();
-                            sc->setName(m_renameBuffer);
-                            addMessage("\xe2\x9c\x8f \xe5\xb7\xb2\xe5\xb0\x86 " + oldName + " \xe9\x87\x8d\xe5\x91\xbd\xe5\x90\x8d\xe4\xb8\xba " + m_renameBuffer);
-                        }
-                        m_inputMode = 0;
-                        m_renameBuffer.clear();
-                    } else if (ch == '\b' || ch == 127) {
-                        if (!m_renameBuffer.empty()) {
-                            do {
-                                m_renameBuffer.pop_back();
-                            } while (!m_renameBuffer.empty() &&
-                                     ((unsigned char)m_renameBuffer.back() & 0xC0) == 0x80);
-                        }
-                    } else if (ch >= 32) {
-                        m_renameBuffer += ch;
-                    }
-                    break;
-                }
-                case 7: { // 休息时长选择
-                    int minutes = 0;
-                    switch (ch) {
-                        case 'a': case 'A': minutes = 5; break;
-                        case 'b': case 'B': minutes = 10; break;
-                        case 'c': case 'C': minutes = 15; break;
-                        case 'd': case 'D': minutes = 20; break;
-                        default: m_inputMode = 0; break;
-                    }
-                    if (minutes > 0) {
-                        m_timer.startRest(minutes);
-                        addMessage("😴 开始休息 " +
-                            std::to_string(minutes) + " 分钟");
-                        m_inputMode = 0;
-                    }
-                    break;
-                }
-                case 8: { // 删除确认
-                    if (ch == 'y' || ch == 'Y') {
-                        if (sc && sc->removeLastObject()) {
-                            addMessage("🗑 已铲除 " + sc->name() + " 的最后一个物体");
-                        }
-                    } else {
-                        addMessage("❌ 已取消铲除");
-                    }
-                    m_inputMode = 0;
-                    break;
-                }
-                case 9: { // 重置确认
-                    if (ch == 'y' || ch == 'Y') {
-                        resetAll();
-                    } else {
-                        addMessage("❌ 已取消重置");
-                    }
-                    m_inputMode = 0;
-                    break;
-                }
-                case 10: { // 夜间暂停恢复确认
-                    if (ch == 'y' || ch == 'Y') {
-                        m_nightPaused = false;
-                        m_resumePrompted = false;
-                        m_inputMode = 0;
-                        addMessage("▶ 继续计时");
-                    } else if (ch == 'n' || ch == 'N') {
-                        m_nightPaused = false;
-                        m_resumePrompted = false;
-                        m_timer.stop();
-                        m_inputMode = 0;
-                        addMessage("⏹ 已停止计时");
-                    }
-                    // 其他键：保持暂停，继续等待确认
-                    break;
-                }
-                case 11: { // 添加子场景：输入名称
-                    if (ch == '\r' || ch == '\n') {
-                        if (!m_renameBuffer.empty()) {
-                            std::vector<Scene>* scenes = scenesOf(m_currentSceneType);
-                            if (scenes) {
-                                scenes->push_back(Scene(m_currentSceneType, m_renameBuffer));
-                                m_currentSceneIndex = (int)scenes->size() - 1;
-                                addMessage("✅ 已添加子场景「" + m_renameBuffer + "」");
-                            }
-                        }
-                        m_inputMode = 0;
-                        m_renameBuffer.clear();
-                    } else if (ch == '\b' || ch == 127) {
-                        if (!m_renameBuffer.empty()) {
-                            do {
-                                m_renameBuffer.pop_back();
-                            } while (!m_renameBuffer.empty() &&
-                                     ((unsigned char)m_renameBuffer.back() & 0xC0) == 0x80);
-                        }
-                    } else if (ch >= 32) {
-                        m_renameBuffer += ch;
-                    }
-                    break;
-                }
-                case 12: { // 删除子场景确认
-                    if (ch == 'y' || ch == 'Y') {
-                        std::vector<Scene>* scenes = scenesOf(m_currentSceneType);
-                        if (scenes && !scenes->empty() &&
-                            m_currentSceneIndex >= 0 && m_currentSceneIndex < (int)scenes->size()) {
-                            std::string nm = (*scenes)[m_currentSceneIndex].name();
-                            scenes->erase(scenes->begin() + m_currentSceneIndex);
-
-                            // 若正在专注的目标在被删类型上，同步修正其索引
-                            if (m_focusSceneType == m_currentSceneType) {
-                                if (m_focusSceneIndex > m_currentSceneIndex) {
-                                    m_focusSceneIndex--;
-                                } else if (m_focusSceneIndex == m_currentSceneIndex) {
-                                    if (m_focusSceneIndex >= (int)scenes->size())
-                                        m_focusSceneIndex = (int)scenes->size() - 1;
-                                    if (m_focusSceneIndex < 0) m_focusSceneIndex = 0;
-                                }
-                            }
-
-                            if (m_currentSceneIndex >= (int)scenes->size())
-                                m_currentSceneIndex = (int)scenes->size() - 1;
-                            if (m_currentSceneIndex < 0) m_currentSceneIndex = 0;
-
-                            addMessage("🗑 已删除子场景「" + nm + "」");
-                        }
                     } else {
                         addMessage("❌ 已取消删除");
                     }
-                    m_inputMode = 0;
-                    break;
+                    m_noteDeleteConfirm = false;
+                } else if (ch == 'd' || ch == 'D') {
+                    m_noteDeleteConfirm = true;
+                } else {
+                    m_noteViewIdx = -1;
                 }
-                case 18: {
-                    if (ch == 27) {
-                        m_countdownNameBuffer.clear();
-                        m_inputMode = 0;
-                        addMessage("❌ 已取消设置倒计时");
-                    } else if (ch == '\r' || ch == '\n') {
-                        if (m_countdownNameBuffer.empty()) {
-                            m_countdownName.clear();
-                            m_countdownTargetDate.clear();
-                            m_countdownPendingName.clear();
-                            m_countdownDaysBuffer.clear();
-                            m_inputMode = 0;
-                            saveToFile();
-                            addMessage("⏳ 已清除倒计时");
-                        } else {
-                            m_countdownPendingName = m_countdownNameBuffer;
-                            m_countdownNameBuffer.clear();
-                            m_countdownDaysBuffer.clear();
-                            m_inputMode = 19;
-                            addMessage("⏳ 请输入距离「" + m_countdownPendingName + "」还有多少天，或直接输入目标日期 YYYY-MM-DD");
-                        }
-                    } else if (ch == '\b' || ch == 127) {
-                        popUtf8Char(m_countdownNameBuffer);
-                    } else if (ch >= 32) {
-                        m_countdownNameBuffer += (char)ch;
-                    }
-                    break;
-                }
-                case 19: {
-                    if (ch == 27) {
-                        m_countdownNameBuffer.clear();
-                        m_countdownDaysBuffer.clear();
-                        m_countdownPendingName.clear();
-                        m_inputMode = 0;
-                        addMessage("❌ 已取消设置倒计时");
-                    } else if (ch == '\r' || ch == '\n') {
-                        std::string v = trimAscii(m_countdownDaysBuffer);
-                        bool byDate = isValidDateFilter(v);
-                        int days = byDate ? 0 : parseSeqInput(v);
-                        if (!byDate && (days <= 0 || days > 9999)) {
-                            addMessage("❌ 请输入 1-9999 之间的天数，或 YYYY-MM-DD 格式的日期");
-                            m_countdownDaysBuffer.clear();
-                        } else {
-                            m_countdownName = m_countdownPendingName;
-                            if (byDate) {
-                                m_countdownTargetDate = v;
-                            } else {
-                                m_countdownTargetDate = dateKeyFromDays(dateKeyToDays(todayDateKey()) + days);
-                            }
-                            int left = (int)(dateKeyToDays(m_countdownTargetDate) - dateKeyToDays(todayDateKey()));
-                            m_countdownNameBuffer.clear();
-                            m_countdownDaysBuffer.clear();
-                            m_countdownPendingName.clear();
-                            m_inputMode = 0;
-                            saveToFile();
-                            addMessage("⏳ 倒计时已设置：距「" + m_countdownName + "」还有 " +
-                                       std::to_string(left) + " 天");
-                        }
-                    } else if (ch == '\b' || ch == 127) {
-                        if (!m_countdownDaysBuffer.empty()) m_countdownDaysBuffer.pop_back();
-                    } else if ((ch >= '0' && ch <= '9') || ch == '-') {
-                        m_countdownDaysBuffer += (char)ch;
-                    }
-                    break;
-                }
-                case 21: {
-                    if (ch == 27) {
-                        m_weatherCityBuffer.clear();
-                        m_inputMode = 0;
-                        addMessage("❌ 已取消设置天气地点");
-                    } else if (ch == '\r' || ch == '\n') {
-                        std::string v = trimAscii(m_weatherCityBuffer);
-                        m_weatherCityBuffer = v;
-                        m_inputMode = 0;
-                        if (v.empty()) {
-                            if (writeFileAtomic(WEATHER_CITY_FILE, "")) {
-                                m_weatherCity.clear();
-                                refreshWeatherNow();
-                                addMessage("📍 已恢复为自动定位天气");
-                            } else {
-                                addMessage("❌ 无法保存地点设置");
-                            }
-                        } else {
-                            addMessage("🔍 正在查找「" + v + "」...");
-                            renderUI();
-                            if (!writeFileAtomic(WEATHER_CITY_FILE, v)) {
-                                addMessage("❌ 无法保存地点设置");
-                            } else {
-                                WeatherInfo wi;
-                                if (!queryWeatherNow(wi)) {
-                                    writeFileAtomic(WEATHER_CITY_FILE, m_weatherCity);
-                                    addMessage("❌ 查询失败，请检查网络或 Python 后重试");
-                                } else if (!wi.matched) {
-                                    writeFileAtomic(WEATHER_CITY_FILE, m_weatherCity);
-                                    addMessage("❌ 没找到「" + v + "」（服务返回的是 " + wi.city +
-                                               "），换个写法试试，如：广州 / 天河区");
-                                } else {
-                                    m_weatherCity = v;
-                                    std::string where = wi.city;
-                                    if (!wi.district.empty()) where += " · " + wi.district;
-                                    addMessage("📍 天气地点已设为「" + v + "」→ " + where + "  " + wi.weather);
-                                    refreshWeatherNow();
-                                }
-                            }
-                        }
-                    } else if (ch == '\b' || ch == 127) {
-                        popUtf8Char(m_weatherCityBuffer);
-                    } else if (ch >= 32) {
-                        m_weatherCityBuffer += (char)ch;
-                    }
-                    break;
-                }
+                break;
             }
+            switch (ch) {
+                case 'n': case 'N':
+                    m_noteTitleBuffer.clear();
+                    m_noteContentBuffer.clear();
+                    addMessage("📝 请输入笔记标题（留空回车=用当前时间作标题）");
+                    m_inputMode = 13;
+                    break;
+                case 'v': case 'V':
+                    if (m_notes.empty()) {
+                        addMessage("❌ 还没有笔记");
+                        break;
+                    }
+                    m_noteInputBuffer.clear();
+                    addMessage("📖 输入要查看的笔记序号，回车确认");
+                    m_inputMode = 20;
+                    break;
+                case 'd': case 'D':
+                    if (m_notes.empty()) {
+                        addMessage("❌ 还没有笔记");
+                        break;
+                    }
+                    m_noteInputBuffer.clear();
+                    addMessage("🗑 输入要删除的笔记序号，回车确认");
+                    m_inputMode = 17;
+                    break;
+                case 'f': case 'F':
+                    m_noteInputBuffer.clear();
+                    addMessage("🔎 输入日期筛选（YYYY-MM-DD / YYYY-MM / YYYY，留空回车=清除）");
+                    m_inputMode = 15;
+                    break;
+                case 'g': case 'G':
+                    m_noteInputBuffer.clear();
+                    addMessage("🔎 输入标题关键词（留空回车=清除）");
+                    m_inputMode = 16;
+                    break;
+                case 'c': case 'C':
+                    m_noteFilterDate.clear();
+                    m_noteFilterTitle.clear();
+                    m_notePage = 0;
+                    addMessage("🔎 已清除全部筛选");
+                    break;
+                case 't': case 'T':
+                    m_countdownNameBuffer.clear();
+                    m_countdownDaysBuffer.clear();
+                    m_countdownPendingName.clear();
+                    addMessage("⏳ 设置倒计时：请输入事件名称（留空回车=清除倒计时）");
+                    m_inputMode = 18;
+                    break;
+                case 27:
+                case 'b': case 'B':
+                    m_inNotes = false;
+                    m_noteViewIdx = -1;
+                    m_noteDeleteConfirm = false;
+                    break;
+                default:
+                    break;
+            }
+            break;
         }
     }
+    return true;
 }
+
+bool Game::handleSceneKey(unsigned char ch) {
+    if (m_inputMode != 0) return false;
+    Scene* sc = currentScene();
+    if (!sc) return true;
+    switch (ch) {
+    case 'b': case 'B':
+        m_inMainMenu = true;
+        break;
+    case 'm': case 'M':
+        m_inMarket = true;
+        break;
+    case 'w': case 'W':
+        m_inWarehouse = true;
+        break;
+    case '1': {
+        if (isNightTime()) {
+            addMessage("🌙 夜深了，去睡个觉吧···");
+            break;
+        }
+        if (m_timer.state() == PomodoroTimer::State::RESTING) {
+            m_timer.stop();
+            addMessage("\xe2\x8f\xb9 \xe5\xb7\xb2\xe5\x81\x9c\xe6\xad\xa2\xe4\xbc\x91\xe6\x81\xaf");
+        }
+        if (m_timer.state() == PomodoroTimer::State::FOCUSING) {
+            addMessage("\xe2\x9d\x8c \xe7\x95\xaa\xe8\x8c\x84\xe9\x92\x9f\xe5\xb7\xb2\xe5\x9c\xa8\xe8\xbf\x90\xe8\xa1\x8c\xe4\xb8\xad");
+            break;
+        }
+        if (!sc->currentObject()) {
+            addMessage("❌ 请先种植一个物体，再开始专注");
+            break;
+        }
+        if (sc->currentObject() && sc->currentObject()->isMature()) {
+            addMessage("\xe2\x9d\x8c \xe5\xbd\x93\xe5\x89\x8d\xe7\x89\xa9\xe4\xbd\x93\xe5\xb7\xb2\xe6\x88\x90\xe7\x86\x9f\xef\xbc\x8c\xe8\xaf\xb7\xe5\x85\x88\xe7\xa7\x8d\xe6\xa4\x8d\xe6\x96\xb0\xe7\x89\xa9\xe4\xbd\x93");
+            break;
+        }
+        // 15h/24h 限制检查
+        double f24 = focusInLast24h();
+        if (f24 >= 15.0) {
+            addMessage("\xe2\x9d\x8c 24\xe5\xb0\x8f\xe6\x97\xb6\xe5\x86\x85\xe5\xb7\xb2\xe4\xb8\x93\xe6\xb3\xa8 " +
+                std::to_string(static_cast<int>(f24 * 60)) + " 分钟，已达到上限15小时，请休息后再来");
+            break;
+        }
+        // 预设专注时长：10, 20, 30, 40, 60, 90, 120分钟
+        addMessage("\xe2\x8f\xb1 \xe8\xaf\xb7\xe9\x80\x89\xe6\x8b\xa9\xe4\xb8\x93\xe6\xb3\xa8\xe6\x97\xb6\xe9\x95\xbf: [A]10min [B]20min [C]30min [D]40min [E]1h [F]1.5h [G]2h [H]3.5h");
+        m_inputMode = 1;
+        break;
+    }
+    case '2': {
+        // 停止专注或休息
+        if (m_timer.state() == PomodoroTimer::State::IDLE) {
+            addMessage("\xe2\x9d\x8c \xe6\xb2\xa1\xe6\x9c\x89\xe5\x9c\xa8\xe8\xbf\x9b\xe8\xa1\x8c\xe7\x9a\x84\xe8\xae\xa1\xe6\x97\xb6");
+            break;
+        }
+        Scene* focusSc = getScene(m_focusSceneType, m_focusSceneIndex);
+        if (!focusSc) focusSc = sc;
+        int elapsed = m_timer.elapsedSeconds();
+        double hours = elapsed / 3600.0;
+        if (hours > 0 && m_timer.state() == PomodoroTimer::State::FOCUSING) {
+            focusSc->addFocusHours(hours);
+            addFocusRecord(hours, focusSc->name());
+            recordFocus(hours);
+            collectMature(focusSc);
+            addMessage("\xe2\x8f\xb9 \xe6\x89\x8b\xe5\x8a\xa8\xe5\x81\x9c\xe6\xad\xa2\xe4\xb8\x93\xe6\xb3\xa8\xef\xbc\x8c\xe5\xb7\xb2\xe7\xb4\xaf\xe7\xa7\xaf " +
+                std::to_string(static_cast<int>(hours * 60)) + " \xe5\x88\x86\xe9\x92\x9f");
+            if (hours >= Scene::MIN_FOCUS_FOR_PEST_RESET) {
+                addMessage("\xf0\x9f\x8c\xbf " + focusSc->name() + " \xe6\x9d\x82\xe8\x8d\x89\xe8\xae\xa1\xe6\x97\xb6\xe5\x99\xa8\xe5\xb7\xb2\xe9\x87\x8d\xe7\xbd\xae");
+            } else {
+                addMessage("⚠ 专注不足20分钟，杂草计时器未重置");
+            }
+            addMessage("😴 要休息一下吗？ [A]5min [B]10min [C]15min [D]20min 或任意键跳过");
+            m_inputMode = 7;
+        } else if (m_timer.state() == PomodoroTimer::State::RESTING) {
+            addMessage("\xe2\x8f\xb9 \xe6\x89\x8b\xe5\x8a\xa8\xe5\x81\x9c\xe6\xad\xa2\xe4\xbc\x91\xe6\x81\xaf");
+        }
+        m_timer.stop();
+        break;
+    }
+    case '0': {
+        if (m_timer.state() == PomodoroTimer::State::FOCUSING) {
+            Scene* focusSc = getScene(m_focusSceneType, m_focusSceneIndex);
+            if (!focusSc) focusSc = sc;
+            int elapsed = m_timer.elapsedSeconds();
+            double hours = elapsed / 3600.0;
+            if (hours > 0 && focusSc) {
+                focusSc->addFocusHours(hours);
+                addFocusRecord(hours, focusSc->name());
+                recordFocus(hours);
+                collectMature(focusSc);
+                addMessage("\xe2\x8f\xb9 \xe5\xb7\xb2\xe5\x81\x9c\xe6\xad\xa2\xe4\xb8\x93\xe6\xb3\xa8\xef\xbc\x8c\xe5\xb7\xb2\xe7\xb4\xaf\xe7\xa7\xaf " +
+                    std::to_string(static_cast<int>(hours * 60)) + " \xe5\x88\x86\xe9\x92\x9f");
+                if (hours >= Scene::MIN_FOCUS_FOR_PEST_RESET) {
+                    addMessage("\xf0\x9f\x8c\xbf " + focusSc->name() + " \xe6\x9d\x82\xe8\x8d\x89\xe8\xae\xa1\xe6\x97\xb6\xe5\x99\xa8\xe5\xb7\xb2\xe9\x87\x8d\xe7\xbd\xae");
+                } else {
+                    addMessage("⚠ 专注不足20分钟，杂草计时器未重置");
+                }
+            }
+            m_timer.stop();
+        }
+        if (m_timer.state() == PomodoroTimer::State::RESTING) {
+            addMessage("\xe2\x9d\x8c \xe5\xb7\xb2\xe5\x9c\xa8\xe4\xbc\x91\xe6\x81\xaf\xe4\xb8\xad");
+            break;
+        }
+        addMessage("\xf0\x9f\x98\xb4 \xe8\xaf\xb7\xe9\x80\x89\xe6\x8b\xa9\xe4\xbc\x91\xe6\x81\xaf\xe6\x97\xb6\xe9\x95\xbf: [A]5min [B]10min [C]15min [D]20min \xe6\x88\x96\xe4\xbb\xbb\xe6\x84\x8f\xe9\x94\xae\xe8\xb7\xb3\xe8\xbf\x87");
+        m_inputMode = 7;
+        return true;
+    }
+    case '3': {
+        // 种新作物
+        if (!sc->canPlant()) {
+            addMessage("\xe2\x9d\x8c \xe5\xbd\x93\xe5\x89\x8d\xe7\x89\xa9\xe4\xbd\x93\xe8\xbf\x98\xe6\x9c\xaa\xe5\xae\x8c\xe5\x85\xa8\xe9\x95\xbf\xe5\xa4\xa7\xef\xbc\x81");
+            break;
+        }
+        switch (sc->type()) {
+            case SceneType::FOREST:
+                addMessage("\xf0\x9f\x8c\xb1 \xe9\x80\x89\xe6\x8b\xa9\xe6\xa0\x91\xe7\xa7\x8d: [A]\xf0\x9f\x8c\xb2\xe6\x9d\xbe [B]\xf0\x9f\x8c\xb3\xe8\x90\xbd\xe5\x8f\xb6 [C]\xf0\x9f\x8c\xb4\xe6\xa3\x95\xe6\xa6\x88");
+                m_inputMode = 2;
+                break;
+            case SceneType::POND:
+                addMessage("\xf0\x9f\x90\x9f \xe9\x80\x89\xe6\x8b\xa9\xe9\xb1\xbc\xe7\xa7\x8d: [A]\xf0\x9f\x90\x9f\xe6\x99\xae\xe9\x80\x9a [B]\xf0\x9f\x90\xa0\xe7\x83\xad\xe5\xb8\xa6 [C]\xf0\x9f\x90\xa1\xe6\xb2\xb3\xe8\xb1\x9a");
+                m_inputMode = 3;
+                break;
+            case SceneType::PASTURE:
+                addMessage("\xf0\x9f\x90\x84 \xe9\x80\x89\xe6\x8b\xa9\xe7\x89\xb2\xe7\x95\x9c: [A]\xf0\x9f\x90\x84\xe7\x89\x9b [B]\xf0\x9f\x90\x91\xe7\xbe\x8a [C]\xf0\x9f\x90\x96\xe7\x8c\xaa [D]\xf0\x9f\x90\x93\xe9\xb8\xa1");
+                m_inputMode = 4;
+                break;
+            case SceneType::FIELD:
+                addMessage("\xf0\x9f\x8c\xbe \xe9\x80\x89\xe6\x8b\xa9\xe4\xbd\x9c\xe7\x89\xa9: [A]\xf0\x9f\x8c\xbe\xe5\xb0\x8f\xe9\xba\xa6 [B]\xf0\x9f\x8c\xbd\xe7\x8e\x89\xe7\xb1\xb3 [C]\xf0\x9f\xa5\x95\xe8\x83\xa1\xe8\x90\x9d\xe5\x8d\x9c [D]\xf0\x9f\x8d\x85\xe8\xa5\xbf\xe7\xba\xa2\xe6\x9f\xbf [E]\xf0\x9f\x8d\x93\xe8\x8d\x89\xe8\x8e\x93 [F]\xf0\x9f\x8d\x86\xe8\x8c\x84\xe5\xad\x90 [G]\xf0\x9f\xa5\x92\xe9\xbb\x84\xe7\x93\x9c");
+                m_inputMode = 5;
+                break;
+            default: break;
+        }
+        break;
+    }
+    case '4': {
+        // 清除有害物品
+        if (sc->pestCount() > 0) {
+            sc->removePest();
+            addMessage("🧹 清除了一个" + sc->pestEmoji());
+        } else {
+            addMessage("❌ 没有有害物品！");
+        }
+        break;
+    }
+    case 'l': case 'L': {
+        // 封锁/解锁
+        sc->setLocked(!sc->locked());
+        addMessage(sc->locked() ? "\xf0\x9f\x94\x92 \xe5\xb7\xb2\xe5\xb0\x81\xe9\x94\x81 " + sc->name()
+                                : "\xf0\x9f\x94\x93 \xe5\xb7\xb2\xe8\xa7\xa3\xe9\x94\x81 " + sc->name());
+        break;
+    }
+    case 'r': case 'R': {
+        // 重命名场景
+        addMessage("✏ 请输入新名称，按 Enter 确认:");
+        m_renameBuffer.clear();
+        m_inputMode = 6;
+        break;
+    }
+    case 'd': case 'D': {
+        // 铲除当前物体
+        if (sc->objects().empty()) {
+            addMessage("❌ 当前场景没有物体可铲除！");
+            break;
+        }
+        addMessage("⚠ 确认铲除 " + sc->name() + " 的最后一个物体？[Y]确认 [其他键]取消");
+        m_inputMode = 8;
+        return true;
+    }
+    case 'x': case 'X': {
+        // 系统重置
+        addMessage("⚠ 确认重置整个系统？游戏进度将全部丢失（笔记与倒计时保留）[Y]确认 [其他键]取消");
+        m_inputMode = 9;
+        return true;
+    }
+    }
+    /* 场景命令若已开启输入模式（专注时长/种植类型/休息/重命名/确认），
+       必须立即结束本轮：否则触发键会被下方的输入模式当成选项或字符消费掉
+       例如按1会被case1的default把inputMode重置为0，导致专注永远无法开始 */
+    if (m_inputMode > 0) return true;
+    return true;
+}
+
+bool Game::handleInputModeKey(unsigned char ch) {
+    if (m_inputMode <= 0) return false;
+    Scene* sc = currentScene();
+    switch (m_inputMode) {
+        case 1: { // 专注时长选择
+            int minutes = 0;
+            switch (ch) {
+                case 'a': case 'A': minutes = 10; break;
+                case 'b': case 'B': minutes = 20; break;
+                case 'c': case 'C': minutes = 30; break;
+                case 'd': case 'D': minutes = 40; break;
+                case 'e': case 'E': minutes = 60; break;
+                case 'f': case 'F': minutes = 90; break;
+                case 'g': case 'G': minutes = 120; break;
+                case 'h': case 'H': minutes = 210; break;
+                default: m_inputMode = 0; break;
+            }
+            if (minutes > 0) {
+                m_timer.startFocus(minutes);
+                m_lastFocusMinutes = minutes;
+                m_focusSceneType = m_currentSceneType;
+                m_focusSceneIndex = m_currentSceneIndex;
+                m_nightPaused = false;
+                m_resumePrompted = false;
+                addMessage("\xe2\x96\xb6 \xe5\xbc\x80\xe5\xa7\x8b\xe4\xb8\x93\xe6\xb3\xa8 " +
+                    std::to_string(minutes) + " \xe5\x88\x86\xe9\x92\x9f");
+                m_inputMode = 0;
+            }
+            break;
+        }
+        case 2: { // 森林树木类型
+            int typeIdx = -1;
+            switch (ch) {
+                case 'a': case 'A': typeIdx = 0; break; // 松树
+                case 'b': case 'B': typeIdx = 1; break; // 落叶树
+                case 'c': case 'C': typeIdx = 2; break; // 棕榈树
+                default: m_inputMode = 0; break;
+            }
+            if (typeIdx >= 0 && sc) {
+                sc->plant(typeIdx);
+                addMessage("\xf0\x9f\x8c\xb1 \xe5\x9c\xa8 " + sc->name() + " \xe7\xa7\x8d\xe4\xb8\x8b\xe4\xba\x86\xe4\xb8\x80\xe6\xa3\xb5\xe6\xa0\x91");
+                m_inputMode = 0;
+            }
+            break;
+        }
+        case 3: { // 鱼塘鱼类型
+            int typeIdx = -1;
+            switch (ch) {
+                case 'a': case 'A': typeIdx = 0; break;
+                case 'b': case 'B': typeIdx = 1; break;
+                case 'c': case 'C': typeIdx = 2; break;
+                default: m_inputMode = 0; break;
+            }
+            if (typeIdx >= 0 && sc) {
+                sc->plant(typeIdx);
+                addMessage("\xf0\x9f\x90\x9f \xe5\x9c\xa8 " + sc->name() + " \xe6\x94\xbe\xe5\x85\xa5\xe4\xba\x86\xe4\xb8\x80\xe6\x9d\xa1\xe9\xb1\xbc");
+                m_inputMode = 0;
+            }
+            break;
+        }
+        case 4: { // 牧场动物类型
+            int typeIdx = -1;
+            switch (ch) {
+                case 'a': case 'A': typeIdx = 0; break;
+                case 'b': case 'B': typeIdx = 1; break;
+                case 'c': case 'C': typeIdx = 2; break;
+                case 'd': case 'D': typeIdx = 3; break;
+                default: m_inputMode = 0; break;
+            }
+            if (typeIdx >= 0 && sc) {
+                sc->plant(typeIdx);
+                addMessage("\xf0\x9f\x90\x84 \xe5\x9c\xa8 " + sc->name() + " \xe5\xbc\x80\xe5\xa7\x8b\xe5\x85\xbb\xe6\xae\x96\xe4\xba\x86\xe4\xb8\x80\xe5\x8f\xaa\xe5\x8a\xa8\xe7\x89\xa9");
+                m_inputMode = 0;
+            }
+            break;
+        }
+        case 5: { // 稻田作物类型
+            int typeIdx = -1;
+            switch (ch) {
+                case 'a': case 'A': typeIdx = 0; break;
+                case 'b': case 'B': typeIdx = 1; break;
+                case 'c': case 'C': typeIdx = 2; break;
+                case 'd': case 'D': typeIdx = 3; break;
+                case 'e': case 'E': typeIdx = 4; break;
+                case 'f': case 'F': typeIdx = 5; break;
+                case 'g': case 'G': typeIdx = 6; break;
+                default: m_inputMode = 0; break;
+            }
+            if (typeIdx >= 0 && sc) {
+                sc->plant(typeIdx);
+                addMessage("\xf0\x9f\x8c\xbe \xe5\x9c\xa8 " + sc->name() + " \xe6\x92\xad\xe7\xa7\x8d\xe4\xba\x86\xe4\xb8\x80\xe6\xa3\xb5\xe4\xbd\x9c\xe7\x89\xa9");
+                m_inputMode = 0;
+            }
+            break;
+        }
+        case 6: { // 重命名场景
+            if (ch == '\r' || ch == '\n') {
+                if (!m_renameBuffer.empty() && sc) {
+                    std::string oldName = sc->name();
+                    sc->setName(m_renameBuffer);
+                    addMessage("\xe2\x9c\x8f \xe5\xb7\xb2\xe5\xb0\x86 " + oldName + " \xe9\x87\x8d\xe5\x91\xbd\xe5\x90\x8d\xe4\xb8\xba " + m_renameBuffer);
+                }
+                m_inputMode = 0;
+                m_renameBuffer.clear();
+            } else if (ch == '\b' || ch == 127) {
+                if (!m_renameBuffer.empty()) {
+                    do {
+                        m_renameBuffer.pop_back();
+                    } while (!m_renameBuffer.empty() &&
+                             ((unsigned char)m_renameBuffer.back() & 0xC0) == 0x80);
+                }
+            } else if (ch >= 32) {
+                m_renameBuffer += ch;
+            }
+            break;
+        }
+        case 7: { // 休息时长选择
+            int minutes = 0;
+            switch (ch) {
+                case 'a': case 'A': minutes = 5; break;
+                case 'b': case 'B': minutes = 10; break;
+                case 'c': case 'C': minutes = 15; break;
+                case 'd': case 'D': minutes = 20; break;
+                default: m_inputMode = 0; break;
+            }
+            if (minutes > 0) {
+                m_timer.startRest(minutes);
+                addMessage("😴 开始休息 " +
+                    std::to_string(minutes) + " 分钟");
+                m_inputMode = 0;
+            }
+            break;
+        }
+        case 8: { // 删除确认
+            if (ch == 'y' || ch == 'Y') {
+                if (sc && sc->removeLastObject()) {
+                    addMessage("🗑 已铲除 " + sc->name() + " 的最后一个物体");
+                }
+            } else {
+                addMessage("❌ 已取消铲除");
+            }
+            m_inputMode = 0;
+            break;
+        }
+        case 9: { // 重置确认
+            if (ch == 'y' || ch == 'Y') {
+                resetAll();
+            } else {
+                addMessage("❌ 已取消重置");
+            }
+            m_inputMode = 0;
+            break;
+        }
+        case 10: { // 夜间暂停恢复确认
+            if (ch == 'y' || ch == 'Y') {
+                m_nightPaused = false;
+                m_resumePrompted = false;
+                m_inputMode = 0;
+                addMessage("▶ 继续计时");
+            } else if (ch == 'n' || ch == 'N') {
+                m_nightPaused = false;
+                m_resumePrompted = false;
+                m_timer.stop();
+                m_inputMode = 0;
+                addMessage("⏹ 已停止计时");
+            }
+            // 其他键：保持暂停，继续等待确认
+            break;
+        }
+        case 11: { // 添加子场景：输入名称
+            if (ch == '\r' || ch == '\n') {
+                if (!m_renameBuffer.empty()) {
+                    std::vector<Scene>* scenes = scenesOf(m_currentSceneType);
+                    if (scenes) {
+                        scenes->push_back(Scene(m_currentSceneType, m_renameBuffer));
+                        m_currentSceneIndex = (int)scenes->size() - 1;
+                        addMessage("✅ 已添加子场景「" + m_renameBuffer + "」");
+                    }
+                }
+                m_inputMode = 0;
+                m_renameBuffer.clear();
+            } else if (ch == '\b' || ch == 127) {
+                if (!m_renameBuffer.empty()) {
+                    do {
+                        m_renameBuffer.pop_back();
+                    } while (!m_renameBuffer.empty() &&
+                             ((unsigned char)m_renameBuffer.back() & 0xC0) == 0x80);
+                }
+            } else if (ch >= 32) {
+                m_renameBuffer += ch;
+            }
+            break;
+        }
+        case 12: { // 删除子场景确认
+            if (ch == 'y' || ch == 'Y') {
+                std::vector<Scene>* scenes = scenesOf(m_currentSceneType);
+                if (scenes && !scenes->empty() &&
+                    m_currentSceneIndex >= 0 && m_currentSceneIndex < (int)scenes->size()) {
+                    std::string nm = (*scenes)[m_currentSceneIndex].name();
+                    scenes->erase(scenes->begin() + m_currentSceneIndex);
+
+                    // 若正在专注的目标在被删类型上，同步修正其索引
+                    if (m_focusSceneType == m_currentSceneType) {
+                        if (m_focusSceneIndex > m_currentSceneIndex) {
+                            m_focusSceneIndex--;
+                        } else if (m_focusSceneIndex == m_currentSceneIndex) {
+                            if (m_focusSceneIndex >= (int)scenes->size())
+                                m_focusSceneIndex = (int)scenes->size() - 1;
+                            if (m_focusSceneIndex < 0) m_focusSceneIndex = 0;
+                        }
+                    }
+
+                    if (m_currentSceneIndex >= (int)scenes->size())
+                        m_currentSceneIndex = (int)scenes->size() - 1;
+                    if (m_currentSceneIndex < 0) m_currentSceneIndex = 0;
+
+                    addMessage("🗑 已删除子场景「" + nm + "」");
+                }
+            } else {
+                addMessage("❌ 已取消删除");
+            }
+            m_inputMode = 0;
+            break;
+        }
+        case 18: {
+            if (ch == 27) {
+                m_countdownNameBuffer.clear();
+                m_inputMode = 0;
+                addMessage("❌ 已取消设置倒计时");
+            } else if (ch == '\r' || ch == '\n') {
+                if (m_countdownNameBuffer.empty()) {
+                    m_countdownName.clear();
+                    m_countdownTargetDate.clear();
+                    m_countdownPendingName.clear();
+                    m_countdownDaysBuffer.clear();
+                    m_inputMode = 0;
+                    saveToFile();
+                    addMessage("⏳ 已清除倒计时");
+                } else {
+                    m_countdownPendingName = m_countdownNameBuffer;
+                    m_countdownNameBuffer.clear();
+                    m_countdownDaysBuffer.clear();
+                    m_inputMode = 19;
+                    addMessage("⏳ 请输入距离「" + m_countdownPendingName + "」还有多少天，或直接输入目标日期 YYYY-MM-DD");
+                }
+            } else if (ch == '\b' || ch == 127) {
+                popUtf8Char(m_countdownNameBuffer);
+            } else if (ch >= 32) {
+                m_countdownNameBuffer += (char)ch;
+            }
+            break;
+        }
+        case 19: {
+            if (ch == 27) {
+                m_countdownNameBuffer.clear();
+                m_countdownDaysBuffer.clear();
+                m_countdownPendingName.clear();
+                m_inputMode = 0;
+                addMessage("❌ 已取消设置倒计时");
+            } else if (ch == '\r' || ch == '\n') {
+                std::string v = trimAscii(m_countdownDaysBuffer);
+                bool byDate = isCalendarDate(v);
+                int days = byDate ? 0 : parseSeqInput(v);
+                if (!byDate && (days <= 0 || days > 9999)) {
+                    addMessage("❌ 请输入 1-9999 之间的天数，或 YYYY-MM-DD 格式的日期");
+                    m_countdownDaysBuffer.clear();
+                } else {
+                    m_countdownName = m_countdownPendingName;
+                    if (byDate) {
+                        m_countdownTargetDate = v;
+                    } else {
+                        m_countdownTargetDate = dateKeyFromDays(dateKeyToDays(todayDateKey()) + days);
+                    }
+                    int left = (int)(dateKeyToDays(m_countdownTargetDate) - dateKeyToDays(todayDateKey()));
+                    m_countdownNameBuffer.clear();
+                    m_countdownDaysBuffer.clear();
+                    m_countdownPendingName.clear();
+                    m_inputMode = 0;
+                    saveToFile();
+                    addMessage("⏳ 倒计时已设置：距「" + m_countdownName + "」还有 " +
+                               std::to_string(left) + " 天");
+                }
+            } else if (ch == '\b' || ch == 127) {
+                if (!m_countdownDaysBuffer.empty()) m_countdownDaysBuffer.pop_back();
+            } else if ((ch >= '0' && ch <= '9') || ch == '-') {
+                m_countdownDaysBuffer += (char)ch;
+            }
+            break;
+        }
+        case 21: {
+            if (ch == 27) {
+                m_weatherCityBuffer.clear();
+                m_inputMode = 0;
+                addMessage("❌ 已取消设置天气地点");
+            } else if (ch == '\r' || ch == '\n') {
+                std::string v = trimAscii(m_weatherCityBuffer);
+                m_weatherCityBuffer = v;
+                m_inputMode = 0;
+                if (v.empty()) {
+                    if (writeFileAtomic(WEATHER_CITY_FILE, UTF8_BOM_STR)) {
+                        m_weatherCity.clear();
+                        refreshWeatherNow();
+                        addMessage("📍 已恢复为自动定位天气");
+                    } else {
+                        addMessage("❌ 无法保存地点设置");
+                    }
+                } else {
+                    addMessage("🔍 正在查找「" + v + "」...");
+                    renderUI();
+                    if (!writeFileAtomic(WEATHER_CITY_FILE, std::string(UTF8_BOM_STR) + v)) {
+                        addMessage("❌ 无法保存地点设置");
+                    } else {
+                        WeatherInfo wi;
+                        if (!queryWeatherNow(wi)) {
+                            if (!writeFileAtomic(WEATHER_CITY_FILE, std::string(UTF8_BOM_STR) + m_weatherCity)) {
+                                addMessage("⚠ 地点设置回滚失败，重启后可能误用「" + v + "」");
+                            } else {
+                                addMessage("❌ 查询失败，请检查网络或 Python 后重试");
+                            }
+                        } else if (!wi.matched) {
+                            if (!writeFileAtomic(WEATHER_CITY_FILE, std::string(UTF8_BOM_STR) + m_weatherCity)) {
+                                addMessage("⚠ 地点设置回滚失败，重启后可能误用「" + v + "」");
+                            } else {
+                                addMessage("❌ 没找到「" + v + "」（服务返回的是 " + wi.city +
+                                           "），换个写法试试，如：广州 / 天河区");
+                            }
+                        } else {
+                            m_weatherCity = v;
+                            std::string where = wi.city;
+                            if (!wi.district.empty()) where += " · " + wi.district;
+                            addMessage("📍 天气地点已设为「" + v + "」→ " + where + "  " + wi.weather);
+                            refreshWeatherNow();
+                        }
+                    }
+                }
+            } else if (ch == '\b' || ch == 127) {
+                popUtf8Char(m_weatherCityBuffer);
+            } else if (ch >= 32) {
+                m_weatherCityBuffer += (char)ch;
+            }
+            break;
+        }
+    }
+    return true;
+}
+
 
 void Game::updateGame() {
     auto now = std::chrono::steady_clock::now();
@@ -2276,7 +2336,7 @@ void Game::updateGame() {
                 collectMature(sc);
 
                 m_timer.stop();
-                if (m_inputMode < 13 || m_inputMode > 20) m_inputMode = 0;
+                if (m_inputMode < 13 || m_inputMode > 21) m_inputMode = 0;
 
                 int choice = showChoiceDialog("休息一下？",
                                               "番茄钟计时结束，要休息一下吗？",
@@ -2291,7 +2351,7 @@ void Game::updateGame() {
                 }
             } else if (m_timer.finishedAs() == PomodoroTimer::State::RESTING) {
                 m_timer.stop();
-                if (m_inputMode < 13 || m_inputMode > 20) m_inputMode = 0;
+                if (m_inputMode < 13 || m_inputMode > 21) m_inputMode = 0;
                 addMessage("\xf0\x9f\x94\x94 \xe4\xbc\x91\xe6\x81\xaf\xe6\x97\xb6\xe9\x97\xb4\xe7\xbb\x93\xe6\x9d\x9f\xef\xbc\x81");
 
                 int choice = showChoiceDialog("休息够了吗？",
@@ -2572,6 +2632,7 @@ std::vector<int> Game::filteredNoteIndices() const {
 
 bool Game::saveNotesToFile() {
     std::ostringstream oss;
+    oss << UTF8_BOM_STR;
     oss << "# FocusFarm 笔记文件\n";
     oss << "# 每条笔记以 [note] 开头，包含 time / title / content 三个字段\n\n";
     for (size_t i = 0; i < m_notes.size(); i++) {
@@ -2610,7 +2671,12 @@ void Game::loadNotesFromFile() {
     bool hasField = false;
     bool sawNoteMarker = false;
 
+    bool firstLine = true;
     while (std::getline(ifs, line)) {
+        if (firstLine) {
+            firstLine = false;
+            stripUtf8Bom(line);
+        }
         if (!line.empty() && line.back() == '\r') line.pop_back();
         if (line.empty() || line[0] == '#') continue;
         if (line == "[note]") {
@@ -2687,6 +2753,7 @@ void Game::saveToFile() {
     auto now = std::chrono::system_clock::now();
     auto nowTime = std::chrono::system_clock::to_time_t(now);
 
+    oss << UTF8_BOM_STR;
     oss << "# FocusFarm 配置文件\n";
     oss << "# 保存时间: " << std::ctime(&nowTime);
     oss << "# 此文件包含所有游戏数据，可用于备份和迁移\n";
@@ -2783,7 +2850,12 @@ void Game::loadFromFile() {
     std::string currentSection;
     std::ostringstream currentData;
 
+    bool firstLine = true;
     while (std::getline(ifs, line)) {
+        if (firstLine) {
+            firstLine = false;
+            stripUtf8Bom(line);
+        }
         // 跳过注释和空行
         if (line.empty() || line[0] == '#') continue;
 
@@ -2807,15 +2879,7 @@ void Game::loadFromFile() {
 
     // 解析游戏段落
     auto getGameVal = [&](const std::string& key) -> std::string {
-        auto it = sections.find("game");
-        if (it == sections.end()) return "";
-        const std::string& data = it->second;
-        size_t pos = data.find(key + "=");
-        if (pos == std::string::npos) return "";
-        pos += key.length() + 1;
-        size_t end = data.find('\n', pos);
-        if (end == std::string::npos) end = data.length();
-        return data.substr(pos, end - pos);
+        return sectionValue(sections, "game", key);
     };
 
     std::string cst = getGameVal("currentSceneType");
@@ -2835,12 +2899,7 @@ void Game::loadFromFile() {
         if (it != sections.end()) {
             const std::string& data = it->second;
             auto getVal = [&](const std::string& key) -> std::string {
-                size_t pos = data.find(key + "=");
-                if (pos == std::string::npos) return "";
-                pos += key.length() + 1;
-                size_t end = data.find('\n', pos);
-                if (end == std::string::npos) end = data.length();
-                return data.substr(pos, end - pos);
+                return sectionKeyValue(data, key);
             };
             std::string sv = getVal("state");
             if (!sv.empty()) {
@@ -2868,12 +2927,8 @@ void Game::loadFromFile() {
         if (it == sections.end()) return;
         const std::string& data = it->second;
         auto getVal = [&](const std::string& key) -> int {
-            size_t pos = data.find(key + "=");
-            if (pos == std::string::npos) return 0;
-            pos += key.length() + 1;
-            size_t end = data.find('\n', pos);
-            if (end == std::string::npos) end = data.length();
-            return parseStoi(data.substr(pos, end - pos), "warehouse", key);
+            std::string v = sectionKeyValue(data, key);
+            return v.empty() ? 0 : parseStoi(v, "warehouse", key);
         };
         // 直接设置仓库数值
         int w = getVal("wood");
@@ -2930,12 +2985,7 @@ void Game::loadFromFile() {
         if (it != sections.end()) {
             const std::string& data = it->second;
             auto getHonorVal = [&](const std::string& key) -> std::string {
-                size_t pos = data.find(key + "=");
-                if (pos == std::string::npos) return "";
-                pos += key.length() + 1;
-                size_t end = data.find('\n', pos);
-                if (end == std::string::npos) end = data.length();
-                return data.substr(pos, end - pos);
+                return sectionKeyValue(data, key);
             };
             std::string fs = getHonorVal("fullStreak");
             if (!fs.empty()) m_fullStreak = parseStoi(fs, "honor", "fullStreak");
@@ -2951,16 +3001,11 @@ void Game::loadFromFile() {
         if (it != sections.end()) {
             const std::string& data = it->second;
             auto getCdVal = [&](const std::string& key) -> std::string {
-                size_t pos = data.find(key + "=");
-                if (pos == std::string::npos) return "";
-                pos += key.length() + 1;
-                size_t end = data.find('\n', pos);
-                if (end == std::string::npos) end = data.length();
-                return data.substr(pos, end - pos);
+                return sectionKeyValue(data, key);
             };
             m_countdownName = unescapeNoteText(getCdVal("name"));
             m_countdownTargetDate = trimAscii(getCdVal("targetDate"));
-            if (!m_countdownTargetDate.empty() && !isValidDateFilter(m_countdownTargetDate)) {
+            if (!m_countdownTargetDate.empty() && !isCalendarDate(m_countdownTargetDate)) {
                 m_countdownTargetDate.clear();
                 m_countdownName.clear();
             }

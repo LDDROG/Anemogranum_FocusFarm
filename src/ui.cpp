@@ -1,8 +1,11 @@
 // LDD_ROG 2026.9.9
 
 #include "game.h"
-#include "ui.h"
 #include "weather.h"
+
+#include <iostream>
+#include <iomanip>
+#include <algorithm>
 
 void title(Game &game, std::ostringstream &ui) 
 {

@@ -108,7 +108,7 @@ g++ -std=c++17 -O2 -pthread \
 
 ```bash
 g++ -std=c++17 -O2 -static -static-libgcc -static-libstdc++ -pthread \
-    -o FocusFarm-v1.1.2.exe \
+    -o FocusFarm-v1.1.3.exe \
     src/main.cpp src/game.cpp src/ui.cpp src/weather.cpp build/app_res.o -lgdi32
 ```
 
