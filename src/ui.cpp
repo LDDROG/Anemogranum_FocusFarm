@@ -23,11 +23,16 @@ void title(Game &game, std::ostringstream &ui)
     auto w = weather();
     if (w.locationAvailable) 
     {
-        ui << "📍 " << w.city << ", " << w.country << "\n";
+        ui << "📍 " << w.city;
+        if (!w.district.empty()) ui << " · " << w.district;
+        ui << ", " << w.country << "\n";
         ui << "⛅ " << w.weather << "  🌡 " << w.temp << "°C  💧 " << w.humidity << "%  💨 " << w.wind << "\n";
+        if (!w.matched) {
+            ui << "⚠ 地点关键词没匹配上，按 P 重新指定\n";
+        }
     } 
     else
-        ui << "⚠ 无法获取位置信息，请检查Windows定位设置\n";
+        ui << "⚠ " << w.city << "：" << w.weather << "（按 P 可手动指定地点）\n";
 
     if (game.hasCountdown()) {
         int dl = game.countdownDaysLeft();
@@ -40,15 +45,17 @@ void title(Game &game, std::ostringstream &ui)
     ui << "     📝 笔记 " << game.noteCount() << " 条（按 N 打开）\n";
 
     int im = game.inputMode();
-    if (im == 18 || im == 19) {
+    if (im == 18 || im == 19 || im == 21) {
         std::time_t nc = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
         std::tm* ti = std::localtime(&nc);
         bool cursorOn = (ti && (ti->tm_sec % 2 == 0));
         if (im == 18) {
             ui << "   事件名称: " << game.countdownNameBuffer() << (cursorOn ? "▌" : " ") << "\n";
-        } else {
+        } else if (im == 19) {
             ui << "   距「" << game.countdownPendingName() << "」还有 "
                << game.countdownDaysBuffer() << (cursorOn ? "▌" : " ") << "\n";
+        } else {
+            ui << "   城市名称: " << game.weatherCityBuffer() << (cursorOn ? "▌" : " ") << "\n";
         }
     }
     ui << "\n";
@@ -535,6 +542,8 @@ void renderFooter(Game& game, std::ostringstream& ui) {
         ui << "  [Enter]确认事件名（留空=清除倒计时）  [Esc]取消\n";
     } else if (im == 19) {
         ui << "  [Enter]确认天数或日期  [Esc]取消\n";
+    } else if (im == 21) {
+        ui << "  [Enter]确认地点（留空=恢复自动定位）  [Esc]取消\n";
     } else if (im == 10) {
         ui << "  [Y]继续计时  [N]停止\n";
     } else if (im == 1) {
@@ -565,12 +574,13 @@ void renderFooter(Game& game, std::ostringstream& ui) {
         ui << "  [B]返回主菜单  [Q]退出\n";
     } else if (game.inMainMenu()) {
         ui << "  [1-4]选择场景 [Enter]进入 [M]集市 [W]仓库 [H]记录 [S]速度 [X]重置\n";
-        ui << "  [A]添加子场景 [D]删除子场景 [↑↓]切换子场景 [Q]保存并退出\n";
+        ui << "  [A]添加子场景 [D]删除子场景 [N]笔记 [T]倒计时 [P]地点 [Q]退出\n";
     } else {
         Scene* sc = game.currentScene();
         ui << "  [1]专注 [2]停止 [3]种植 [4]除害 [D]铲除作物 [0]休息 [L]"
            << (sc && sc->locked() ? "解锁当前场景" : "封锁当前场景") << " [R]重命名\n";
-        ui << "  [B]地图 [M]集市 [W]仓库 [X]重置 [↑↓←→]切换 [Q]保存退出\n";
+        ui << "  [B]地图 [M]集市 [W]仓库 [X]重置 [N]笔记 [T]倒计时 [P]地点\n";
+        ui << "  [↑↓←→]切换场景/子场景  [Q]保存退出\n";
     }
 
     ui << "\n── 消息 ──\n";

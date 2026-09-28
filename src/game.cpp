@@ -308,6 +308,20 @@ static bool writeFileAtomic(const std::string& path, const std::string& content)
     return true;
 }
 
+static std::string readTextFileTrimmed(const std::string& path) {
+    std::ifstream ifs(path.c_str(), std::ios::binary);
+    if (!ifs) return "";
+    std::ostringstream oss;
+    oss << ifs.rdbuf();
+    ifs.close();
+    std::string s = oss.str();
+    if (s.size() >= 3 &&
+        (unsigned char)s[0] == 0xEF && (unsigned char)s[1] == 0xBB && (unsigned char)s[2] == 0xBF) {
+        s.erase(0, 3);
+    }
+    return trimAscii(s);
+}
+
 static std::wstring toWide(const std::string& s) {
     if (s.empty()) return std::wstring();
     int n = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), (int)s.size(), NULL, 0);
@@ -1029,8 +1043,12 @@ void Game::run() {
     catchUpPests(m_fields);
 
     // 后台天气刷新
+    m_weatherCity = readTextFileTrimmed(WEATHER_CITY_FILE);
     startWeatherService();
     loadNotesFromFile();
+    if (!m_weatherCity.empty()) {
+        addMessage("📍 天气地点：" + m_weatherCity + "（按 P 可修改）");
+    }
     addMessage("🍃 欢迎回来~");
 
     mainLoop();
@@ -1250,6 +1268,12 @@ void Game::processInput() {
                 m_countdownPendingName.clear();
                 addMessage("⏳ 设置倒计时：请输入事件名称（留空回车=清除倒计时）");
                 m_inputMode = 18;
+                continue;
+            }
+            if (ch == 'p' || ch == 'P') {
+                m_weatherCityBuffer = m_weatherCity;
+                addMessage("📍 请输入城市名称（支持模糊搜索，如：广州 / 天河区 / 浦东新区；留空回车=恢复自动定位）");
+                m_inputMode = 21;
                 continue;
             }
         }
@@ -2153,6 +2177,53 @@ void Game::processInput() {
                     }
                     break;
                 }
+                case 21: {
+                    if (ch == 27) {
+                        m_weatherCityBuffer.clear();
+                        m_inputMode = 0;
+                        addMessage("❌ 已取消设置天气地点");
+                    } else if (ch == '\r' || ch == '\n') {
+                        std::string v = trimAscii(m_weatherCityBuffer);
+                        m_weatherCityBuffer = v;
+                        m_inputMode = 0;
+                        if (v.empty()) {
+                            if (writeFileAtomic(WEATHER_CITY_FILE, "")) {
+                                m_weatherCity.clear();
+                                refreshWeatherNow();
+                                addMessage("📍 已恢复为自动定位天气");
+                            } else {
+                                addMessage("❌ 无法保存地点设置");
+                            }
+                        } else {
+                            addMessage("🔍 正在查找「" + v + "」...");
+                            renderUI();
+                            if (!writeFileAtomic(WEATHER_CITY_FILE, v)) {
+                                addMessage("❌ 无法保存地点设置");
+                            } else {
+                                WeatherInfo wi;
+                                if (!queryWeatherNow(wi)) {
+                                    writeFileAtomic(WEATHER_CITY_FILE, m_weatherCity);
+                                    addMessage("❌ 查询失败，请检查网络或 Python 后重试");
+                                } else if (!wi.matched) {
+                                    writeFileAtomic(WEATHER_CITY_FILE, m_weatherCity);
+                                    addMessage("❌ 没找到「" + v + "」（服务返回的是 " + wi.city +
+                                               "），换个写法试试，如：广州 / 天河区");
+                                } else {
+                                    m_weatherCity = v;
+                                    std::string where = wi.city;
+                                    if (!wi.district.empty()) where += " · " + wi.district;
+                                    addMessage("📍 天气地点已设为「" + v + "」→ " + where + "  " + wi.weather);
+                                    refreshWeatherNow();
+                                }
+                            }
+                        }
+                    } else if (ch == '\b' || ch == 127) {
+                        popUtf8Char(m_weatherCityBuffer);
+                    } else if (ch >= 32) {
+                        m_weatherCityBuffer += (char)ch;
+                    }
+                    break;
+                }
             }
         }
     }
@@ -3007,6 +3078,7 @@ void Game::resetAll() {
     m_countdownNameBuffer.clear();
     m_countdownDaysBuffer.clear();
     m_countdownPendingName.clear();
+    m_weatherCityBuffer.clear();
 
     // 重置时间戳
     m_lastPestCheck = std::chrono::steady_clock::now();

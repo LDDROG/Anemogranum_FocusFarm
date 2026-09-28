@@ -300,6 +300,9 @@ public:
     bool saveNotesToFile();
     void loadNotesFromFile();
 
+    const std::string& weatherCity() const { return m_weatherCity; }
+    const std::string& weatherCityBuffer() const { return m_weatherCityBuffer; }
+
     bool hasCountdown() const { return !m_countdownTargetDate.empty(); }
     const std::string& countdownName() const { return m_countdownName; }
     int countdownDaysLeft() const;
@@ -309,6 +312,7 @@ public:
 
     static constexpr int NOTE_PAGE_SIZE = 8;
     static constexpr const char* NOTES_FILE = "focusfarm_notes.dat";
+    static constexpr const char* WEATHER_CITY_FILE = "focusfarm_weather_city.txt";
 
 private:
     Game();
@@ -383,6 +387,9 @@ private:
     int m_notePage = 0;
     int m_noteViewIdx = -1;
     bool m_noteDeleteConfirm = false;
+
+    std::string m_weatherCity;
+    std::string m_weatherCityBuffer;
 
     std::string m_countdownName;
     std::string m_countdownTargetDate;

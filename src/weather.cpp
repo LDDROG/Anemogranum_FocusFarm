@@ -12,6 +12,7 @@ static constexpr int WEATHER_REFRESH_SEC = 900;
 static WeatherInfo g_weather;
 static std::mutex g_mutex;
 static std::atomic<bool> g_running{false};
+static std::atomic<bool> g_forceRefresh{false};
 static std::thread g_thread;
 
 struct PipeCloser {
@@ -61,7 +62,7 @@ static WeatherInfo fetchOnce() {
     if (result.find("\"error\"") != std::string::npos) {
         w.locationAvailable = false;
         w.city = "获取失败";
-        w.weather = "请检查网络或Windows定位设置";
+        w.weather = findValue("error");
     } else if (result.empty()) {
         w.locationAvailable = false;
         w.city = "无响应";
@@ -69,10 +70,12 @@ static WeatherInfo fetchOnce() {
     } else {
         w.city = findValue("city");
         w.country = findValue("country");
+        w.district = findValue("district");
         w.weather = findValue("weather");
         w.temp = findValue("temp_c");
         w.humidity = findValue("humidity");
         w.wind = findValue("wind_speed");
+        w.matched = (findValue("matched") != "0");
         w.locationAvailable = true;
     }
     return w;
@@ -83,8 +86,29 @@ WeatherInfo weather() {
     return g_weather;
 }
 
+void refreshWeatherNow() {
+    g_forceRefresh = true;
+}
+
+bool queryWeatherNow(WeatherInfo& out) {
+    WeatherInfo w;
+    try {
+        w = fetchOnce();
+    } catch (...) {
+        return false;
+    }
+    if (!w.locationAvailable) return false;
+    out = w;
+    {
+        std::lock_guard<std::mutex> lk(g_mutex);
+        g_weather = w;
+    }
+    return true;
+}
+
 void startWeatherService() {
     if (g_running.exchange(true)) return;
+    g_forceRefresh = false;
     g_thread = std::thread([]() {
         while (g_running) {
             try {
@@ -95,8 +119,10 @@ void startWeatherService() {
                 }
             } catch (...) {}   // 失败时保留上一次的天气数据
             for (int i = 0; i < WEATHER_REFRESH_SEC && g_running; i++) {
+                if (g_forceRefresh.exchange(false)) break;
                 std::this_thread::sleep_for(std::chrono::seconds(1));
             }
+            g_forceRefresh = false;
         }
     });
 }
@@ -104,5 +130,6 @@ void startWeatherService() {
 void stopWeatherService() 
 {
     g_running = false;
+    g_forceRefresh = true;
     if (g_thread.joinable()) g_thread.join();
 }

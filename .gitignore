@@ -6,3 +6,5 @@ build/
 *.zip
 .vscode
 focusfarm_save.dat
+focusfarm_notes.dat
+focusfarm_weather_city.txt
