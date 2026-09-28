@@ -401,6 +401,8 @@ static int showChoiceDialog(const std::string& titleUtf8, const std::string& tex
     std::wstring wb1 = toWide(btn1Utf8);
     std::wstring wb2 = toWide(btn2Utf8);
 
+    HWND hPrevFore = GetForegroundWindow();
+
     HWND hwnd = CreateWindowExW(WS_EX_TOPMOST, clsName, wt.c_str(),
                                 WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
                                 x, y, W, H, NULL, NULL, hInst, &st);
@@ -450,8 +452,12 @@ static int showChoiceDialog(const std::string& titleUtf8, const std::string& tex
     }
 
     FlushConsoleInputBuffer(GetStdHandle(STD_INPUT_HANDLE));
-    HWND hConsole = GetConsoleWindow();
-    if (hConsole) SetForegroundWindow(hConsole);
+    if (hPrevFore && IsWindow(hPrevFore)) {
+        SetForegroundWindow(hPrevFore);
+    } else {
+        HWND hConsole = GetConsoleWindow();
+        if (hConsole) SetForegroundWindow(hConsole);
+    }
     return st.result;
 }
 
@@ -997,7 +1003,17 @@ void Game::run() {
         std::cout << "  （程序已停止，未对存档做任何写入；如需重新开始，可删除该文件，"
                      "但会丢失全部进度）" << std::endl;
         std::cout << std::endl << "  按任意键退出..." << std::flush;
-        system("pause");
+        {
+            HANDLE hIn = GetStdHandle(STD_INPUT_HANDLE);
+            if (hIn != INVALID_HANDLE_VALUE) {
+                FlushConsoleInputBuffer(hIn);
+                INPUT_RECORD rec;
+                DWORD read = 0;
+                while (ReadConsoleInputW(hIn, &rec, 1, &read) && read > 0) {
+                    if (rec.EventType == KEY_EVENT && rec.Event.KeyEvent.bKeyDown) break;
+                }
+            }
+        }
         std::exit(1);
     }
 
@@ -1065,6 +1081,8 @@ void Game::readInput()
             if (code >= 0) {
                 m_inputBuffer += static_cast<char>(224);
                 m_inputBuffer += static_cast<char>(code);
+            } else if (k.wVirtualKeyCode == VK_TAB) {
+                m_inputBuffer += static_cast<char>(9);
             }
         }
     }
@@ -1435,7 +1453,7 @@ void Game::processInput() {
                         }
                         m_noteContentBuffer.clear();
                         m_inputMode = 14;
-                        addMessage("📝 请输入正文（Enter 换行，Ctrl+S 保存，Esc 取消）");
+                        addMessage("📝 请输入正文（Enter 换行，Tab 保存，Esc 取消）");
                     } else if (ch == '\b' || ch == 127) {
                         popUtf8Char(m_noteTitleBuffer);
                     } else if (ch >= 32) {
@@ -1444,7 +1462,7 @@ void Game::processInput() {
                     break;
                 }
                 case 14: {
-                    if (ch == 0x13) {
+                    if (ch == '\t') {
                         if (m_noteContentBuffer.empty()) {
                             addMessage("❌ 正文为空，无法保存（Esc 取消）");
                             break;

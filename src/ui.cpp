@@ -409,7 +409,7 @@ void renderNotesUI(Game& game, std::ostringstream& ui)
         ui << boldText(game.noteTitleBuffer()) << "\n\n";
         ui << game.noteContentBuffer() << blink() << "\n\n";
         ui << sepLine << "\n";
-        ui << "Ctrl+S 保存     Enter 换行     Esc 取消\n";
+        ui << "Tab 保存     Enter 换行     Esc 取消\n";
         return;
     }
     if (im == 15) {
