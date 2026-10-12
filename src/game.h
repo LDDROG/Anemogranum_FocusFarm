@@ -226,7 +226,7 @@ public:
     void stop();
 
     // 持久化
-    void saveToFile();
+    void saveToFile(bool silent = false);
     void loadFromFile();
     void resetAll();
 
@@ -406,6 +406,7 @@ private:
 
     bool m_uiDirty = true;
     int m_lastRenderSecond = -1;
+    std::chrono::steady_clock::time_point m_lastAutoSave;
 
     static constexpr int PEST_PUNISH_THRESHOLD = 7;
     static constexpr const char* SAVE_FILE = "focusfarm_save.dat";

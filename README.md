@@ -30,7 +30,7 @@ Mac 版本以后再说···
 - ⏳ **天数倒计时**：所有页面常驻显示距离自定义事件还有多少天。
 - 📍 **天气地点**：可手动指定城市并支持行政区划模糊搜索（输入「天河区」也能定位到广州市），留空则恢复自动定位。
 - 🌃 **夜间保护**：每天 23:00 – 05:00 强制不计时。
-- 💾 **自动存档**：按 `Q` 或关闭终端窗口都会自动存档在本地文件 `focusfarm_save.dat`。
+- 💾 **自动存档**：每分钟自动保存一次当前状态，按 `Q` 或关闭终端窗口时也会存档，数据保存在本地文件 `focusfarm_save.dat`。
 
 ---
 
@@ -108,7 +108,7 @@ g++ -std=c++17 -O2 -pthread \
 
 ```bash
 g++ -std=c++17 -O2 -static -static-libgcc -static-libstdc++ -pthread \
-    -o FocusFarm-v1.1.3.exe \
+    -o FocusFarm-v1.1.4.exe \
     src/main.cpp src/game.cpp src/ui.cpp src/weather.cpp build/app_res.o -lgdi32
 ```
 

@@ -1147,6 +1147,15 @@ void Game::mainLoop() {
 
         updateGame();
 
+        // 每分钟自动保存一次（首次进入循环时立即保存一次）
+        {
+            auto nowSteady = std::chrono::steady_clock::now();
+            if (nowSteady - m_lastAutoSave >= std::chrono::seconds(60)) {
+                m_lastAutoSave = nowSteady;
+                saveToFile(true);
+            }
+        }
+
         if (!m_showMoonGod && m_warehouse.moon() >= 3) {
             summonMoonGod();
         }
@@ -2747,7 +2756,7 @@ void Game::renderUI() {
 
 // LLLLLLLLLDDDDDDDDDDDDDDDDDDD 持久化
 
-void Game::saveToFile() {
+void Game::saveToFile(bool silent) {
     std::ostringstream oss;
 
     auto now = std::chrono::system_clock::now();
@@ -2835,7 +2844,9 @@ void Game::saveToFile() {
         addMessage("❌ 配置保存失败！请检查文件是否被占用或磁盘空间不足");
         return;
     }
-    addMessage("💾 配置已保存到 " + std::string(SAVE_FILE));
+    if (!silent) {
+        addMessage("💾 配置已保存到 " + std::string(SAVE_FILE));
+    }
 }
 
 void Game::loadFromFile() {
