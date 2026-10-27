@@ -1337,6 +1337,12 @@ bool Game::handleGlobalKey(unsigned char ch) {
         m_inputMode = 21;
         return true;
     }
+    if (ch == 'k' || ch == 'K') {
+        m_shortTaskBuffer = m_shortTask;
+        addMessage("📌 设置短期任务：输入内容后回车确认（留空回车=清除）");
+        m_inputMode = 23;
+        return true;
+    }
     return false;
 }
 
@@ -1868,6 +1874,7 @@ bool Game::handleSceneKey(unsigned char ch) {
             addMessage("\xe2\x8f\xb9 \xe6\x89\x8b\xe5\x8a\xa8\xe5\x81\x9c\xe6\xad\xa2\xe4\xbc\x91\xe6\x81\xaf");
         }
         m_timer.stop();
+        m_nightPaused = false;
         break;
     }
     case '0': {
@@ -1890,6 +1897,7 @@ bool Game::handleSceneKey(unsigned char ch) {
                 }
             }
             m_timer.stop();
+            m_nightPaused = false;
         }
         if (m_timer.state() == PomodoroTimer::State::RESTING) {
             addMessage("\xe2\x9d\x8c \xe5\xb7\xb2\xe5\x9c\xa8\xe4\xbc\x91\xe6\x81\xaf\xe4\xb8\xad");
@@ -2100,6 +2108,7 @@ bool Game::handleInputModeKey(unsigned char ch) {
                 default: m_inputMode = 0; break;
             }
             if (minutes > 0) {
+                m_nightPaused = false;
                 m_timer.startRest(minutes);
                 addMessage("😴 开始休息 " +
                     std::to_string(minutes) + " 分钟");
@@ -2355,6 +2364,28 @@ bool Game::handleInputModeKey(unsigned char ch) {
             }
             break;
         }
+        case 23: { // 短期任务
+            if (ch == 27) {
+                m_shortTaskBuffer.clear();
+                m_inputMode = 0;
+                addMessage("❌ 已取消设置短期任务");
+            } else if (ch == '\r' || ch == '\n') {
+                m_shortTask = utf8Truncate(trimAscii(m_shortTaskBuffer), 40);
+                m_shortTaskBuffer.clear();
+                m_inputMode = 0;
+                if (m_shortTask.empty()) {
+                    addMessage("📌 已清除短期任务");
+                } else {
+                    addMessage("📌 短期任务：" + m_shortTask);
+                }
+                saveToFile();
+            } else if (ch == '\b' || ch == 127) {
+                popUtf8Char(m_shortTaskBuffer);
+            } else if (ch >= 32) {
+                m_shortTaskBuffer += (char)ch;
+            }
+            break;
+        }
     }
     return true;
 }
@@ -2407,7 +2438,7 @@ void Game::updateGame() {
                 collectMature(sc);
 
                 m_timer.stop();
-                if (m_inputMode < 13 || m_inputMode > 22) m_inputMode = 0;
+                if (m_inputMode < 13 || m_inputMode > 23) m_inputMode = 0;
 
                 int choice = showChoiceDialog("休息一下？",
                                               "番茄钟计时结束，要休息一下吗？",
@@ -2422,7 +2453,7 @@ void Game::updateGame() {
                 }
             } else if (m_timer.finishedAs() == PomodoroTimer::State::RESTING) {
                 m_timer.stop();
-                if (m_inputMode < 13 || m_inputMode > 22) m_inputMode = 0;
+                if (m_inputMode < 13 || m_inputMode > 23) m_inputMode = 0;
                 addMessage("\xf0\x9f\x94\x94 \xe4\xbc\x91\xe6\x81\xaf\xe6\x97\xb6\xe9\x97\xb4\xe7\xbb\x93\xe6\x9d\x9f\xef\xbc\x81");
 
                 int choice = showChoiceDialog("休息够了吗？",
@@ -2741,6 +2772,7 @@ void Game::loadNotesFromFile() {
     bool inNote = false;
     bool hasField = false;
     bool sawNoteMarker = false;
+    int markerCount = 0;
 
     bool firstLine = true;
     while (std::getline(ifs, line)) {
@@ -2756,6 +2788,7 @@ void Game::loadNotesFromFile() {
             inNote = true;
             hasField = false;
             sawNoteMarker = true;
+            markerCount++;
             continue;
         }
         if (!inNote) continue;
@@ -2780,6 +2813,15 @@ void Game::loadNotesFromFile() {
         std::remove(bak.c_str());
         if (std::rename(NOTES_FILE, bak.c_str()) == 0) {
             addMessage("⚠ 笔记文件内容异常，已原样备份为 " + bak + "（避免被新笔记覆盖）");
+        }
+    } else if (markerCount > 0 && (int)m_notes.size() < markerCount) {
+        // 解析出的条数少于文件里的标记数，说明有笔记没读出来。
+        // 先把原文件留一份，避免后续保存把没读到的内容永久覆盖掉。
+        std::string bak = std::string(NOTES_FILE) + ".bak";
+        std::remove(bak.c_str());
+        if (std::rename(NOTES_FILE, bak.c_str()) == 0) {
+            addMessage("⚠ 笔记只读取到 " + std::to_string((int)m_notes.size()) + "/" +
+                       std::to_string(markerCount) + " 条，原文件已备份为 " + bak);
         }
     }
 }
@@ -2886,7 +2928,8 @@ void Game::saveToFile(bool silent) {
     // 总天数倒计时
     oss << "[countdown]\n";
     oss << "name=" << escapeNoteText(m_countdownName) << "\n";
-    oss << "targetDate=" << m_countdownTargetDate << "\n\n";
+    oss << "targetDate=" << m_countdownTargetDate << "\n";
+    oss << "shortTask=" << escapeNoteText(m_shortTask) << "\n\n";
 
     oss << "[dailyFocus]\n";
     for (const auto& p : m_dailyFocus) {
@@ -3022,6 +3065,8 @@ void Game::loadFromFile() {
             std::string fsi = getVal("focusSceneIndex");
             if (!fsi.empty()) m_focusSceneIndex = parseStoi(fsi, "timer", "focusSceneIndex");
             m_nightPaused = (getVal("nightPaused") == "1");
+            // 待机状态下没有"暂停"可言，避免旧存档或异常退出留下的脏标记
+            if (m_timer.state() == PomodoroTimer::State::IDLE) m_nightPaused = false;
         }
     }
 
@@ -3110,6 +3155,7 @@ void Game::loadFromFile() {
             };
             m_countdownName = unescapeNoteText(getCdVal("name"));
             m_countdownTargetDate = trimAscii(getCdVal("targetDate"));
+            m_shortTask = trimAscii(unescapeNoteText(getCdVal("shortTask")));
             if (!m_countdownTargetDate.empty() && !isCalendarDate(m_countdownTargetDate)) {
                 m_countdownTargetDate.clear();
                 m_countdownName.clear();
@@ -3229,6 +3275,7 @@ void Game::resetAll() {
     m_countdownNameBuffer.clear();
     m_countdownDaysBuffer.clear();
     m_countdownPendingName.clear();
+    m_shortTaskBuffer.clear();
     m_weatherCityBuffer.clear();
 
     // 重置时间戳

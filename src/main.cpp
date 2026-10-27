@@ -81,29 +81,9 @@ int main() {
 
 
     
-    std::cout << R"(                                                           
-║                                                                      
-║        
-║        风带来故事的种子，时间使之发芽···                    
-║     
-║   四种专注场景，可用于不同类别的专注：                                                           
-║           📖 森林      🐟 鱼塘                          
-║           🐄 牧场      🌾 稻田
-║   查看已拥有的作物和物品需要前往： 🏠 仓库
-║   可以在以下场景使用作物兑换物品： 🏪 集市                                                                                
-║                                                                      
-║   操作说明：                                                         
-║   · ↑↓←→ 浏览场景，Enter 进入                                       
-║   · 按 1 开始专注，按 2 停止专注                                
-║   · 按 3 种植作物，按 4 除害，按 D 铲除作物                      
-║   · 按 J 补录之前的专注时间（需先种下未成熟的作物）              
-║   · N 笔记本，T 倒计时设置
-║   · M 集市，W 仓库，X 重置系统，Q 保存并退出                                                   
-║   
-║                                                                   
-    )" << std::endl;
-
-    std::cout << "\n  按 Enter 键开始..." << std::endl;
+    std::cout << "风带来故事的种子，时间使之发芽。\n\n";
+    std::cout << "欢迎回来\n\n";
+    std::cout << "按 Enter 键进入..." << std::endl;
     HANDLE hIn = GetStdHandle(STD_INPUT_HANDLE);
     FlushConsoleInputBuffer(hIn);
     while (true) {

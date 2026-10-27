@@ -13,29 +13,26 @@ void title(Game &game, std::ostringstream &ui)
         ui << "🌃 夜深了，去睡个觉吧···\n\n";
     }
 
-    ui << boldText("( ‘-ωก̀ ) 专注农场") << "\n";
-
     auto now = std::chrono::system_clock::now();
     auto now_c = std::chrono::system_clock::to_time_t(now);
     std::tm tm_info;
     localtime_s(&tm_info, &now_c);
     ui << std::put_time(&tm_info, "%Y年%m月%d日 %H:%M:%S") << "\n";
     ui << "当前你在：" << game.pageLabel() << "\n";
-    ui << seasonLabel() << "\n";
 
     auto w = weather();
     if (w.locationAvailable) 
     {
         ui << "📍 " << w.city;
         if (!w.district.empty()) ui << " · " << w.district;
-        ui << ", " << w.country << "\n";
+        ui << ", " << w.country << "   " << seasonLabel() << "\n";
         ui << "⛅ " << w.weather << "  🌡 " << w.temp << "°C  💧 " << w.humidity << "%  💨 " << w.wind << "\n";
         if (!w.matched) {
             ui << "⚠ 地点关键词没匹配上，按 P 重新指定\n";
         }
     } 
     else
-        ui << "⚠ " << w.city << "：" << w.weather << "（按 P 可手动指定地点）\n";
+        ui << "⚠ " << w.city << "：" << w.weather << "（按 P 可手动指定地点）   " << seasonLabel() << "\n";
 
     if (game.hasCountdown()) {
         int dl = game.countdownDaysLeft();
@@ -45,10 +42,14 @@ void title(Game &game, std::ostringstream &ui)
     } else {
         ui << "⏳ 倒计时未设置（按 T 设置）";
     }
-    ui << "     📝 笔记 " << game.noteCount() << " 条（按 N 打开）\n";
+    if (game.hasShortTask()) {
+        ui << "，短期任务：" << game.shortTask();
+    }
+    ui << "\n";
+    ui << "📝 笔记 " << game.noteCount() << " 条（按 N 打开）\n";
 
     int im = game.inputMode();
-    if (im == 18 || im == 19 || im == 21) {
+    if (im == 18 || im == 19 || im == 21 || im == 23) {
         std::time_t nc = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
         std::tm* ti = std::localtime(&nc);
         bool cursorOn = (ti && (ti->tm_sec % 2 == 0));
@@ -57,6 +58,8 @@ void title(Game &game, std::ostringstream &ui)
         } else if (im == 19) {
             ui << "   距「" << game.countdownPendingName() << "」还有 "
                << game.countdownDaysBuffer() << (cursorOn ? "▌" : " ") << "\n";
+        } else if (im == 23) {
+            ui << "   短期任务: " << game.shortTaskBuffer() << (cursorOn ? "▌" : " ") << "\n";
         } else {
             ui << "   城市名称: " << game.weatherCityBuffer() << (cursorOn ? "▌" : " ") << "\n";
         }
@@ -64,19 +67,21 @@ void title(Game &game, std::ostringstream &ui)
     ui << "\n";
 
     auto& t = game.timer();
-    ui << "🍅 番茄钟: " << t.stateStr();
-    if (game.nightPaused()) {
-        ui << "  ⏸ 已暂停（等待确认继续）";
-    } else if (t.state() != PomodoroTimer::State::IDLE) {
-        ui << "  ⏱ " << t.timeStr();
-        int total = t.totalSeconds();
-        int remaining = t.remainingSeconds();
-        int progress = total > 0 ? (total - remaining) * 20 / total : 0;
-        ui << "  [";
-        for (int i = 0; i < 20; i++) ui << (i < progress ? "█" : "░");
-        ui << "]";
+    if (t.state() != PomodoroTimer::State::IDLE) {
+        ui << "🍅 番茄钟: " << t.stateStr();
+        if (game.nightPaused()) {
+            ui << "  ⏸ 已暂停（等待确认继续）";
+        } else {
+            ui << "  ⏱ " << t.timeStr();
+            int total = t.totalSeconds();
+            int remaining = t.remainingSeconds();
+            int progress = total > 0 ? (total - remaining) * 20 / total : 0;
+            ui << "  [";
+            for (int i = 0; i < 20; i++) ui << (i < progress ? "█" : "░");
+            ui << "]";
+        }
+        ui << "\n";
     }
-    ui << "\n";
 
     int todayMins = (int)(game.todayFocusHours() * 60 + 0.5);
     ui << "📅 今日专注 " << todayMins / 60 << " 小时 " << todayMins % 60 << " 分钟";
@@ -85,7 +90,6 @@ void title(Game &game, std::ostringstream &ui)
 
 void renderMainMenu(Game& game, std::ostringstream& ui) 
 {
-    ui << "🗺 地图  杂草生成速度: " << game.pestIntervalLabel() << "\n";
     int dMoon = game.daysSinceMoonAward();
     if (dMoon >= 0 && dMoon < 3) {
         ui << "你上周获得了一个🌙~~再接再厉\n";
@@ -207,15 +211,7 @@ void renderSceneUI(Game& game, std::ostringstream& ui)
         double progress = obj->accumulatedHours / SceneObject::HOURS_TO_MATURE * 100.0;
         if (progress > 100.0) progress = 100.0;
 
-        std::string stageName;
-        switch (obj->stage) {
-            case GrowthStage::SEEDLING: stageName = "幼苗 🌱"; break;
-            case GrowthStage::GROWING: stageName = "成长中 🌿"; break;
-            case GrowthStage::MATURE: stageName = "已成熟 ✓"; break;
-        }
-
-        ui << "阶段: " << stageName << "\n";
-        ui << "进度: " << std::fixed << std::setprecision(1) << progress << "%  [";
+        ui << "成长: " << std::fixed << std::setprecision(1) << progress << "%  [";
         int bar = (int)(progress / 5.0);
         for (int i = 0; i < 20; i++) ui << (i < bar ? "█" : "░");
         ui << "]\n";
@@ -553,6 +549,8 @@ void renderFooter(Game& game, std::ostringstream& ui) {
         ui << "  [A]10min [B]20min [C]30min [D]40min [E]1h [F]1.5h [G]2h [H]3.5h\n";
     } else if (im == 22) {
         ui << "  补录专注时长: [A]10min [B]20min [C]30min [D]40min [E]1h [F]1.5h [G]2h [H]3.5h  [Esc]取消\n";
+    } else if (im == 23) {
+        ui << "  输入短期任务，回车确认（留空=清除）  [Esc]取消\n";
     } else if (im == 7) {
         ui << "  [A]5min [B]10min [C]15min [D]20min 或任意键跳过\n";
     } else if (im == 6) {
@@ -579,12 +577,12 @@ void renderFooter(Game& game, std::ostringstream& ui) {
         ui << "  [B]返回主菜单  [Q]退出\n";
     } else if (game.inMainMenu()) {
         ui << "  [1-4]选择场景 [Enter]进入 [M]集市 [W]仓库 [H]记录 [S]速度 [X]重置\n";
-        ui << "  [A]添加子场景 [D]删除子场景 [N]笔记 [T]倒计时 [P]地点 [Q]退出\n";
+        ui << "  [A]添加子场景 [D]删除子场景 [N]笔记 [T]倒计时 [K]任务 [P]地点 [Q]退出\n";
     } else {
         Scene* sc = game.currentScene();
         ui << "  [1]专注 [2]停止 [3]种植 [4]除害 [D]铲除作物 [0]休息 [J]补录 [L]"
            << (sc && sc->locked() ? "解锁当前场景" : "封锁当前场景") << " [R]重命名\n";
-        ui << "  [B]地图 [M]集市 [W]仓库 [X]重置 [N]笔记 [T]倒计时 [P]地点\n";
+        ui << "  [B]地图 [M]集市 [W]仓库 [X]重置 [N]笔记 [T]倒计时 [K]任务 [P]地点\n";
         ui << "  [↑↓←→]切换场景/子场景  [Q]保存退出\n";
     }
 

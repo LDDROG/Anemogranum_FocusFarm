@@ -308,6 +308,10 @@ public:
     const std::string& countdownDaysBuffer() const { return m_countdownDaysBuffer; }
     const std::string& countdownPendingName() const { return m_countdownPendingName; }
 
+    bool hasShortTask() const { return !m_shortTask.empty(); }
+    const std::string& shortTask() const { return m_shortTask; }
+    const std::string& shortTaskBuffer() const { return m_shortTaskBuffer; }
+
     static constexpr int NOTE_PAGE_SIZE = 8;
     static constexpr const char* NOTES_FILE = "focusfarm_notes.dat";
     static constexpr const char* WEATHER_CITY_FILE = "focusfarm_weather_city.txt";
@@ -403,6 +407,9 @@ private:
     std::string m_countdownNameBuffer;
     std::string m_countdownDaysBuffer;
     std::string m_countdownPendingName;
+
+    std::string m_shortTask;
+    std::string m_shortTaskBuffer;
 
     bool m_uiDirty = true;
     int m_lastRenderSecond = -1;
