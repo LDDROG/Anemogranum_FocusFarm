@@ -551,6 +551,8 @@ void renderFooter(Game& game, std::ostringstream& ui) {
         ui << "  [Y]继续计时  [N]停止\n";
     } else if (im == 1) {
         ui << "  [A]10min [B]20min [C]30min [D]40min [E]1h [F]1.5h [G]2h [H]3.5h\n";
+    } else if (im == 22) {
+        ui << "  补录专注时长: [A]10min [B]20min [C]30min [D]40min [E]1h [F]1.5h [G]2h [H]3.5h  [Esc]取消\n";
     } else if (im == 7) {
         ui << "  [A]5min [B]10min [C]15min [D]20min 或任意键跳过\n";
     } else if (im == 6) {
@@ -580,7 +582,7 @@ void renderFooter(Game& game, std::ostringstream& ui) {
         ui << "  [A]添加子场景 [D]删除子场景 [N]笔记 [T]倒计时 [P]地点 [Q]退出\n";
     } else {
         Scene* sc = game.currentScene();
-        ui << "  [1]专注 [2]停止 [3]种植 [4]除害 [D]铲除作物 [0]休息 [L]"
+        ui << "  [1]专注 [2]停止 [3]种植 [4]除害 [D]铲除作物 [0]休息 [J]补录 [L]"
            << (sc && sc->locked() ? "解锁当前场景" : "封锁当前场景") << " [R]重命名\n";
         ui << "  [B]地图 [M]集市 [W]仓库 [X]重置 [N]笔记 [T]倒计时 [P]地点\n";
         ui << "  [↑↓←→]切换场景/子场景  [Q]保存退出\n";

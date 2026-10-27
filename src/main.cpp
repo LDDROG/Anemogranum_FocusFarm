@@ -32,6 +32,26 @@ int main() {
     SetConsoleOutputCP(CP_UTF8);
     SetConsoleCP(CP_UTF8);
 
+    // 单实例：两个进程会各自加载存档并轮流覆盖，必然丢进度
+    HANDLE hInstanceMutex = CreateMutexA(NULL, TRUE, "Local\\FocusFarm_SingleInstance");
+    if (hInstanceMutex != NULL && GetLastError() == ERROR_ALREADY_EXISTS) {
+        std::cout << "⚠ 已经有一个 FocusFarm 在运行。" << std::endl;
+        std::cout << "  同时开两个会互相覆盖存档、丢失进度，本次已退出。" << std::endl;
+        std::cout << "  请先关闭已打开的窗口再试。" << std::endl;
+        std::cout << std::endl << "  按任意键退出..." << std::flush;
+        HANDLE hIn = GetStdHandle(STD_INPUT_HANDLE);
+        if (hIn != INVALID_HANDLE_VALUE) {
+            FlushConsoleInputBuffer(hIn);
+            INPUT_RECORD rec;
+            DWORD read = 0;
+            while (ReadConsoleInputW(hIn, &rec, 1, &read) && read > 0) {
+                if (rec.EventType == KEY_EVENT && rec.Event.KeyEvent.bKeyDown) break;
+            }
+        }
+        CloseHandle(hInstanceMutex);
+        return 1;
+    }
+
     HANDLE hOut = GetStdHandle(STD_OUTPUT_HANDLE);
     if (hOut != INVALID_HANDLE_VALUE) {
         DWORD dwMode = 0;
@@ -76,6 +96,7 @@ int main() {
 ║   · ↑↓←→ 浏览场景，Enter 进入                                       
 ║   · 按 1 开始专注，按 2 停止专注                                
 ║   · 按 3 种植作物，按 4 除害，按 D 铲除作物                      
+║   · 按 J 补录之前的专注时间（需先种下未成熟的作物）              
 ║   · N 笔记本，T 倒计时设置
 ║   · M 集市，W 仓库，X 重置系统，Q 保存并退出                                                   
 ║   

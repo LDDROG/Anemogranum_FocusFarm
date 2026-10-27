@@ -407,6 +407,7 @@ private:
     bool m_uiDirty = true;
     int m_lastRenderSecond = -1;
     std::chrono::steady_clock::time_point m_lastAutoSave;
+    bool m_stateLoaded = false;
 
     static constexpr int PEST_PUNISH_THRESHOLD = 7;
     static constexpr const char* SAVE_FILE = "focusfarm_save.dat";

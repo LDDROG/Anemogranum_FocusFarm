@@ -313,7 +313,8 @@ static std::string formatTimePoint(std::chrono::system_clock::time_point tp) {
 static std::mutex g_saveMutex;
 
 static bool writeFileAtomic(const std::string& path, const std::string& content) {
-    std::string tmp = path + ".tmp";
+    // 临时文件名带上进程 ID：多开时不会互相踩同一个临时文件
+    std::string tmp = path + ".tmp" + std::to_string(GetCurrentProcessId());
     {
         std::ofstream ofs(tmp.c_str(), std::ios::binary | std::ios::trunc);
         if (!ofs) return false;
@@ -331,7 +332,9 @@ static bool writeFileAtomic(const std::string& path, const std::string& content)
             return false;
         }
     }
-    if (!MoveFileExA(tmp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING)) {
+    // MOVEFILE_WRITE_THROUGH：确保替换操作在返回前已刷入磁盘，避免断电/强制关机丢数据
+    if (!MoveFileExA(tmp.c_str(), path.c_str(),
+                     MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
         std::remove(tmp.c_str());
         return false;
     }
@@ -1047,6 +1050,8 @@ void Game::run() {
         std::cout << "  请修复 " << SAVE_FILE << " 后重新运行。" << std::endl;
         std::cout << "  （程序已停止，未对存档做任何写入；如需重新开始，可删除该文件，"
                      "但会丢失全部进度）" << std::endl;
+        std::cout << "  上一版存档备份在 " << SAVE_FILE << ".bak，如需回退可将其改名为 "
+                  << SAVE_FILE << std::endl;
         std::cout << std::endl << "  按任意键退出..." << std::flush;
         {
             HANDLE hIn = GetStdHandle(STD_INPUT_HANDLE);
@@ -1784,6 +1789,24 @@ bool Game::handleSceneKey(unsigned char ch) {
     case 'w': case 'W':
         m_inWarehouse = true;
         break;
+    case 'j': case 'J': {
+        // 手动补录专注时间：必须有一个尚未成熟的对象
+        if (m_timer.state() != PomodoroTimer::State::IDLE) {
+            addMessage("❌ 计时进行中，请先按 2 停止后再补录");
+            break;
+        }
+        if (!sc->currentObject()) {
+            addMessage("❌ 请先种植一个物体，再补录专注时间");
+            break;
+        }
+        if (sc->currentObject()->isMature()) {
+            addMessage("❌ 当前物体已成熟，请先种植新物体");
+            break;
+        }
+        addMessage("📝 补录专注时长: [A]10min [B]20min [C]30min [D]40min [E]1h [F]1.5h [G]2h [H]3.5h [Esc]取消");
+        m_inputMode = 22;
+        break;
+    }
     case '1': {
         if (isNightTime()) {
             addMessage("🌙 夜深了，去睡个觉吧···");
@@ -2293,6 +2316,45 @@ bool Game::handleInputModeKey(unsigned char ch) {
             }
             break;
         }
+        case 22: { // 手动补录专注时长
+            int minutes = 0;
+            switch (ch) {
+                case 'a': case 'A': minutes = 10; break;
+                case 'b': case 'B': minutes = 20; break;
+                case 'c': case 'C': minutes = 30; break;
+                case 'd': case 'D': minutes = 40; break;
+                case 'e': case 'E': minutes = 60; break;
+                case 'f': case 'F': minutes = 90; break;
+                case 'g': case 'G': minutes = 120; break;
+                case 'h': case 'H': minutes = 210; break;
+                case 27: addMessage("❌ 已取消补录"); m_inputMode = 0; break;
+                default: m_inputMode = 0; break;
+            }
+            if (minutes > 0) {
+                m_inputMode = 0;
+                if (!sc || !sc->currentObject() || sc->currentObject()->isMature()) {
+                    addMessage("❌ 当前没有未成熟的物体，无法补录");
+                    break;
+                }
+                double hours = minutes / 60.0;
+                double needed = SceneObject::HOURS_TO_MATURE - sc->currentObject()->accumulatedHours;
+                double overflow = (hours > needed) ? (hours - needed) : 0.0;
+                sc->addFocusHours(hours);
+                addFocusRecord(hours, sc->name());
+                recordFocus(hours);
+                collectMature(sc);
+                addMessage("📝 已补录 " + std::to_string(minutes) + " 分钟专注到 " + sc->name());
+                if (overflow > 0.0) {
+                    addMessage("📦 超出成熟所需 " + std::to_string(static_cast<int>(overflow * 60)) +
+                               " 分钟，已保留给下一次种植");
+                }
+                if (hours >= Scene::MIN_FOCUS_FOR_PEST_RESET) {
+                    addMessage("🌿 " + sc->name() + " 杂草计时器已重置");
+                }
+                saveToFile();
+            }
+            break;
+        }
     }
     return true;
 }
@@ -2345,7 +2407,7 @@ void Game::updateGame() {
                 collectMature(sc);
 
                 m_timer.stop();
-                if (m_inputMode < 13 || m_inputMode > 21) m_inputMode = 0;
+                if (m_inputMode < 13 || m_inputMode > 22) m_inputMode = 0;
 
                 int choice = showChoiceDialog("休息一下？",
                                               "番茄钟计时结束，要休息一下吗？",
@@ -2360,7 +2422,7 @@ void Game::updateGame() {
                 }
             } else if (m_timer.finishedAs() == PomodoroTimer::State::RESTING) {
                 m_timer.stop();
-                if (m_inputMode < 13 || m_inputMode > 21) m_inputMode = 0;
+                if (m_inputMode < 13 || m_inputMode > 22) m_inputMode = 0;
                 addMessage("\xf0\x9f\x94\x94 \xe4\xbc\x91\xe6\x81\xaf\xe6\x97\xb6\xe9\x97\xb4\xe7\xbb\x93\xe6\x9d\x9f\xef\xbc\x81");
 
                 int choice = showChoiceDialog("休息够了吗？",
@@ -2757,6 +2819,12 @@ void Game::renderUI() {
 // LLLLLLLLLDDDDDDDDDDDDDDDDDDD 持久化
 
 void Game::saveToFile(bool silent) {
+    if (!m_stateLoaded) {
+        // 存档尚未加载完成（例如停在欢迎页就关闭窗口），
+        // 此时内存里只有默认值，绝不能拿去覆盖真实存档
+        return;
+    }
+
     std::ostringstream oss;
 
     auto now = std::chrono::system_clock::now();
@@ -2840,6 +2908,14 @@ void Game::saveToFile(bool silent) {
     saveScenes("FIELD", m_fields);
 
     std::lock_guard<std::mutex> lk(g_saveMutex);
+    // 覆盖前保留一份上一版存档，便于误操作后找回
+    {
+        std::ifstream src(SAVE_FILE, std::ios::binary);
+        if (src) {
+            std::ofstream dst(std::string(SAVE_FILE) + ".bak", std::ios::binary | std::ios::trunc);
+            if (dst) dst << src.rdbuf();
+        }
+    }
     if (!writeFileAtomic(SAVE_FILE, oss.str())) {
         addMessage("❌ 配置保存失败！请检查文件是否被占用或磁盘空间不足");
         return;
@@ -2850,9 +2926,14 @@ void Game::saveToFile(bool silent) {
 }
 
 void Game::loadFromFile() {
+    std::lock_guard<std::mutex> lk(g_saveMutex);
     std::ifstream ifs(SAVE_FILE);
     if (!ifs) {
-        // 首次运行，无配置文件
+        // 文件不存在才是真正的首次运行；文件存在却打不开属于异常，必须中止
+        if (GetFileAttributesA(SAVE_FILE) != INVALID_FILE_ATTRIBUTES) {
+            throw std::runtime_error("存档文件存在但无法打开（可能被其他程序占用，或权限不足）");
+        }
+        m_stateLoaded = true;
         return;
     }
 
@@ -2887,6 +2968,19 @@ void Game::loadFromFile() {
         sections[currentSection] = currentData.str();
     }
     ifs.close();
+
+    if (sections.empty()) {
+        throw std::runtime_error("存档文件为空或格式不正确（未找到任何配置段）");
+    }
+
+    // 必需段落缺失说明文件被截断或手工改坏，宁可停止也不能用默认值覆盖
+    static const char* const REQUIRED_SECTIONS[] = {"game", "timer", "warehouse"};
+    for (const char* name : REQUIRED_SECTIONS) {
+        if (sections.find(name) == sections.end()) {
+            throw std::runtime_error(std::string("存档缺少必需段落 [") + name +
+                                     "]，文件可能已损坏或被截断");
+        }
+    }
 
     // 解析游戏段落
     auto getGameVal = [&](const std::string& key) -> std::string {
@@ -3064,6 +3158,7 @@ void Game::loadFromFile() {
     parseScenes("PASTURE", m_pastures, SceneType::PASTURE);
     parseScenes("FIELD", m_fields, SceneType::FIELD);
 
+    m_stateLoaded = true;
     addMessage("📂 配置已从 " + std::string(SAVE_FILE) + " 加载");
 }
 
@@ -3139,10 +3234,13 @@ void Game::resetAll() {
     // 重置时间戳
     m_lastPestCheck = std::chrono::steady_clock::now();
 
-    // 删除存档文件
-    if (GetFileAttributesA(SAVE_FILE) == INVALID_FILE_ATTRIBUTES || std::remove(SAVE_FILE) == 0) {
-        addMessage("🔄 系统已重置为初始状态（笔记与倒计时未受影响）");
-    } else {
-        addMessage("⚠ 系统已重置，但存档文件未能删除，下次启动可能恢复旧数据");
+    // 重置前把旧存档改名保留一份，误操作后还能找回
+    if (GetFileAttributesA(SAVE_FILE) != INVALID_FILE_ATTRIBUTES) {
+        std::string keep = std::string(SAVE_FILE) + ".reset";
+        std::remove(keep.c_str());
+        std::rename(SAVE_FILE, keep.c_str());
     }
+    addMessage("🔄 系统已重置为初始状态（笔记与倒计时未受影响，旧存档已保留为 " +
+               std::string(SAVE_FILE) + ".reset）");
+    saveToFile();
 }
