@@ -84,7 +84,9 @@ void title(Game &game, std::ostringstream &ui)
     }
 
     int todayMins = (int)(game.todayFocusHours() * 60 + 0.5);
+    int allMins = (int)(game.allCountedScenesFocus() * 60 + 0.5);
     ui << "📅 今日专注 " << todayMins / 60 << " 小时 " << todayMins % 60 << " 分钟";
+    ui << "     全场景 " << allMins / 60 << " 小时 " << allMins % 60 << " 分钟";
     ui << "     🔥 连续满额 " << game.fullStreak() << "/5 天\n\n";
 }
 
@@ -112,7 +114,8 @@ void renderMainMenu(Game& game, std::ostringstream& ui)
                 auto& s = (*scenes)[i];
                 bool subSelected = selected && (i == game.currentSceneIndex());
                 ui << "     " << (subSelected ? "→ " : "  ") << s.name()
-                   << (s.locked() ? " 🔒" : "");
+                   << (s.locked() ? " 🔒" : "")
+                   << (s.countToday() ? "" : " ⏸");
                 if (s.pestCount() > 0) ui << " " << s.pestEmoji() << "x" << s.pestCount();
                 if ((int)s.objects().size() > 0) ui << " (" << (int)s.objects().size() << "个)";
                 ui << "\n";
@@ -236,6 +239,7 @@ void renderSceneUI(Game& game, std::ostringstream& ui)
         for (int i = 0; i < (int)scenes->size(); i++) {
             if (i == game.currentSceneIndex()) ui << "[" << (*scenes)[i].name() << "] ";
             else ui << (*scenes)[i].name() << " ";
+            if (!(*scenes)[i].countToday()) ui << "⏸ ";
         }
     }
     ui << "\n";
@@ -583,7 +587,9 @@ void renderFooter(Game& game, std::ostringstream& ui) {
         ui << "  [1]专注 [2]停止 [3]种植 [4]除害 [D]铲除作物 [0]休息 [J]补录 [L]"
            << (sc && sc->locked() ? "解锁当前场景" : "封锁当前场景") << " [R]重命名\n";
         ui << "  [B]地图 [M]集市 [W]仓库 [X]重置 [N]笔记 [T]倒计时 [K]任务 [P]地点\n";
-        ui << "  [↑↓←→]切换场景/子场景  [Q]保存退出\n";
+        ui << "  [C]"
+           << (sc && sc->countToday() ? "不计入今日统计" : "计入今日统计")
+           << "  [↑↓←→]切换场景/子场景  [Q]保存退出\n";
     }
 
     ui << "\n── 消息 ──\n";

@@ -134,6 +134,13 @@ public:
     int pestCount() const { return m_pestCount; }
     bool removePest();
 
+    // 是否把本场景的专注计入"今日专注"统计（副业场景可关闭）
+    bool countToday() const { return m_countToday; }
+    void toggleCountToday() { m_countToday = !m_countToday; }
+
+    // 本场景累计专注：已成熟作物按满额计，未成熟按实际累计，加上待继承的溢出时长
+    double totalFocusHours() const;
+
     void addFocusHours(double hours);
 
     void updatePests();
@@ -165,6 +172,7 @@ private:
     std::chrono::system_clock::time_point m_lastPestCheck;
     double m_pestIntervalHours = 48.0;
     double m_overflowHours = 0.0;  // 专注溢出时长，下次种植时自动加给新物体
+    bool m_countToday = true;      // 是否计入今日专注统计，默认计入
 };
 
 
@@ -266,11 +274,14 @@ public:
 
     double focusInLast24h() const;
     double todayFocusHours() const;
+    // 所有"计入今日"的场景累计专注之和（成熟按满额、未成熟按实际）
+    double allCountedScenesFocus() const;
+    bool isSceneCounted(const std::string& sceneName) const;
     int fullStreak() const { return m_fullStreak; }
     void collectMature(Scene* sc);
 
     // 荣誉系统：月亮（连续5天满上限奖励）
-    void recordFocus(double hours);
+    void recordFocus(double hours, const std::string& sceneName);
     void checkDayRollover();
     int daysSinceMoonAward() const;
 

@@ -758,6 +758,14 @@ void Scene::addFocusHours(double hours) {
     }
 }
 
+double Scene::totalFocusHours() const {
+    double total = m_overflowHours;
+    for (const auto& obj : m_objects) {
+        total += obj.accumulatedHours;
+    }
+    return total;
+}
+
 bool Scene::removePest() {
     if (m_pestCount > 0) {
         m_pestCount--;
@@ -817,6 +825,7 @@ std::string Scene::serialize() const {
     oss << "height=" << m_height << "\n";
     oss << "pestInterval=" << m_pestIntervalHours << "\n";
     oss << "overflowHours=" << m_overflowHours << "\n";
+    oss << "countToday=" << (m_countToday ? "1" : "0") << "\n";
     oss << "lastPestCheck=" << std::chrono::duration_cast<std::chrono::seconds>(
         m_lastPestCheck.time_since_epoch()).count() << "\n";
     oss << "objects=";
@@ -846,6 +855,8 @@ void Scene::deserialize(const std::string& id, const std::string& data)
     m_pestIntervalHours = parseStod(getVal("pestInterval").empty() ? "48.0" : getVal("pestInterval"), id, "pestInterval");
     std::string ovh = getVal("overflowHours");
     m_overflowHours = ovh.empty() ? 0.0 : parseStod(ovh, id, "overflowHours");
+    // 旧存档没有该字段，缺省视为计入
+    m_countToday = (getVal("countToday") != "0");
 
     std::string lpc = getVal("lastPestCheck");
     if (!lpc.empty()) {
@@ -1795,6 +1806,14 @@ bool Game::handleSceneKey(unsigned char ch) {
     case 'w': case 'W':
         m_inWarehouse = true;
         break;
+    case 'c': case 'C': {
+        sc->toggleCountToday();
+        addMessage(sc->countToday()
+            ? "✅ 「" + sc->name() + "」的专注已计入今日统计"
+            : "⏸ 「" + sc->name() + "」的专注不再计入今日统计");
+        saveToFile();
+        break;
+    }
     case 'j': case 'J': {
         // 手动补录专注时间：必须有一个尚未成熟的对象
         if (m_timer.state() != PomodoroTimer::State::IDLE) {
@@ -1859,7 +1878,7 @@ bool Game::handleSceneKey(unsigned char ch) {
         if (hours > 0 && m_timer.state() == PomodoroTimer::State::FOCUSING) {
             focusSc->addFocusHours(hours);
             addFocusRecord(hours, focusSc->name());
-            recordFocus(hours);
+            recordFocus(hours, focusSc->name());
             collectMature(focusSc);
             addMessage("\xe2\x8f\xb9 \xe6\x89\x8b\xe5\x8a\xa8\xe5\x81\x9c\xe6\xad\xa2\xe4\xb8\x93\xe6\xb3\xa8\xef\xbc\x8c\xe5\xb7\xb2\xe7\xb4\xaf\xe7\xa7\xaf " +
                 std::to_string(static_cast<int>(hours * 60)) + " \xe5\x88\x86\xe9\x92\x9f");
@@ -1886,7 +1905,7 @@ bool Game::handleSceneKey(unsigned char ch) {
             if (hours > 0 && focusSc) {
                 focusSc->addFocusHours(hours);
                 addFocusRecord(hours, focusSc->name());
-                recordFocus(hours);
+                recordFocus(hours, focusSc->name());
                 collectMature(focusSc);
                 addMessage("\xe2\x8f\xb9 \xe5\xb7\xb2\xe5\x81\x9c\xe6\xad\xa2\xe4\xb8\x93\xe6\xb3\xa8\xef\xbc\x8c\xe5\xb7\xb2\xe7\xb4\xaf\xe7\xa7\xaf " +
                     std::to_string(static_cast<int>(hours * 60)) + " \xe5\x88\x86\xe9\x92\x9f");
@@ -2350,7 +2369,7 @@ bool Game::handleInputModeKey(unsigned char ch) {
                 double overflow = (hours > needed) ? (hours - needed) : 0.0;
                 sc->addFocusHours(hours);
                 addFocusRecord(hours, sc->name());
-                recordFocus(hours);
+                recordFocus(hours, sc->name());
                 collectMature(sc);
                 addMessage("📝 已补录 " + std::to_string(minutes) + " 分钟专注到 " + sc->name());
                 if (overflow > 0.0) {
@@ -2424,7 +2443,7 @@ void Game::updateGame() {
             if (hours > 0 && m_timer.finishedAs() == PomodoroTimer::State::FOCUSING) {
                 sc->addFocusHours(hours);
                 addFocusRecord(hours, sc->name());
-                recordFocus(hours);
+                recordFocus(hours, sc->name());
                 addMessage("\xe2\x9c\x85 \xe4\xb8\x93\xe6\xb3\xa8\xe5\xae\x8c\xe6\x88\x90\xef\xbc\x81" +
                     sc->name() + " +" + std::to_string(static_cast<int>(hours * 60)) + "\xe5\x88\x86\xe9\x92\x9f");
 
@@ -2541,11 +2560,55 @@ std::string Game::pestIntervalLabel() const {
 }
 
 double Game::todayFocusHours() const {
+    // 按当前"计入今日"开关实时汇总，切换后立即生效。
+    // 先把计入的场景名收集成集合，避免对每条历史记录都遍历一遍场景。
     std::string key = todayDateKey();
-    for (const auto& p : m_dailyFocus) {
-        if (p.first == key) return p.second;
+    std::set<std::string> counted;
+    auto collect = [&](const std::vector<Scene>& list) {
+        for (const auto& sc : list) {
+            if (sc.countToday()) counted.insert(sc.name());
+        }
+    };
+    collect(m_forests);
+    collect(m_ponds);
+    collect(m_pastures);
+    collect(m_fields);
+
+    double total = 0.0;
+    for (const auto& e : m_focusHistory) {
+        if (dateKeyOf(e.time) == key && counted.count(e.sceneName)) {
+            total += e.hours;
+        }
     }
-    return 0.0;
+    return total;
+}
+
+bool Game::isSceneCounted(const std::string& sceneName) const {
+    auto find = [&](const std::vector<Scene>& list) -> int {
+        for (const auto& sc : list) {
+            if (sc.name() == sceneName) return sc.countToday() ? 1 : 0;
+        }
+        return -1;
+    };
+    int r = find(m_forests);
+    if (r < 0) r = find(m_ponds);
+    if (r < 0) r = find(m_pastures);
+    if (r < 0) r = find(m_fields);
+    return r < 0 ? true : (r == 1);  // 场景已被删除时按计入处理，避免漏统计
+}
+
+double Game::allCountedScenesFocus() const {
+    double total = 0.0;
+    auto add = [&](const std::vector<Scene>& list) {
+        for (const auto& sc : list) {
+            if (sc.countToday()) total += sc.totalFocusHours();
+        }
+    };
+    add(m_forests);
+    add(m_ponds);
+    add(m_pastures);
+    add(m_fields);
+    return total;
 }
 
 double Game::focusInLast24h() const {
@@ -2647,8 +2710,11 @@ void Game::checkDayRollover() {
     m_lastDateKey = key;
 }
 
-void Game::recordFocus(double hours) {
+void Game::recordFocus(double hours, const std::string& sceneName) {
     checkDayRollover();
+
+    // 不计入今日统计的场景（如副业）不参与累计与满额判断
+    if (!isSceneCounted(sceneName)) return;
 
     std::string key = todayDateKey();
     double prev = 0.0;
